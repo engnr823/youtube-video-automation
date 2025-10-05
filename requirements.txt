@@ -1,6 +1,4 @@
-# requirements.txt
-
-# --- Core Flask & Celery ---
+--- Core Flask & Celery ---
 flask
 celery[redis]
 gunicorn
@@ -8,7 +6,7 @@ gevent
 python-dotenv
 Jinja2
 
-# --- Content & Data Processing ---
+--- Content & Data Processing ---
 beautifulsoup4
 lxml
 markdown2
@@ -17,13 +15,14 @@ textstat
 requests
 Pillow
 
-# --- API Clients ---
+--- API Clients ---
 openai
 cloudinary
 scrapingbee
 google-search-results
 elevenlabs
+replicate
 
-# --- Add other video clients as needed, e.g. ---
-# runway-ml
-# pika-labs
+--- You can add other video clients in the future if needed, e.g. ---
+runway-ml
+pika-labs
