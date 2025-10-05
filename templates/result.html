@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generating Your Video...</title>
+    <style>
+        :root {
+            --primary-color: #4f46e5; --background-color: #f8fafc; --card-bg: #ffffff;
+            --text-color: #1e293b; --label-color: #64748b; --border-color: #e2e8f0;
+            --shadow-color: rgba(79, 70, 229, 0.05);
+        }
+        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: var(--background-color); margin: 0; padding: 2rem; color: var(--text-color); }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .loader-container { text-align: center; padding: 4rem 1rem; background: var(--card-bg); border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -2px rgba(0,0,0,0.1); }
+        .loader { border: 6px solid #e5e7eb; border-top: 6px solid var(--primary-color); border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; margin: 0 auto 1.5rem auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        #status-message { font-size: 1.25rem; color: var(--text-color); font-weight: 600; }
+        .hidden { display: none; }
+        .grid-container { display: grid; grid-template-columns: 1fr 450px; gap: 2rem; align-items: start; }
+        @media (max-width: 1024px) { .grid-container { grid-template-columns: 1fr; } }
+        
+        .card { background: var(--card-bg); border-radius: 16px; border: 1px solid var(--border-color); box-shadow: 0 4px 6px -1px var(--shadow-color), 0 2px 4px -2px var(--shadow-color); padding: 1.5rem; }
+        .video-panel { padding: 0; overflow: hidden; }
+        .video-container video { display: block; width: 100%; background-color: #000; border-radius: 16px 16px 0 0; }
+        .thumbnail-container { text-align: center; }
+        .thumbnail-container img { max-width: 100%; border-radius: 8px; border: 1px solid var(--border-color); }
+        .metadata-panel { display: flex; flex-direction: column; gap: 1.5rem; }
+        .card h3 { margin: 0 0 1rem 0; font-size: 1.25rem; color: var(--text-color); border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem;}
+        .metadata-field { margin-bottom: 1rem; }
+        .metadata-field label { font-weight: 600; color: var(--label-color); font-size: 0.9rem; display: block; margin-bottom: 0.5rem; }
+        .metadata-field .value { background-color: #f8fafc; padding: 0.75rem; border-radius: 8px; font-size: 0.95rem; white-space: pre-wrap; word-wrap: break-word; }
+        .metadata-field .tags .value { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+        .metadata-field .tag { background-color: #eef2ff; color: var(--primary-color); padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.85rem; font-weight: 500; }
+        .toast { position: fixed; bottom: -100px; left: 50%; transform: translateX(-50%); background-color: #1e293b; color: white; padding: 1rem 2rem; border-radius: 8px; z-index: 1000; transition: all 0.5s ease; }
+        .toast.show { bottom: 2rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <main>
+            <div id="loader" class="loader-container">
+                <div class="loader"></div>
+                <h2 id="status-message">Initializing Video Generation...</h2>
+                <p>Your AI-powered video is being created. This may take several minutes.</p>
+            </div>
+
+            <div id="results" class="hidden">
+                <div class="grid-container">
+                    <div class="card video-panel">
+                        <div class="video-container">
+                            <video id="video-player" controls muted autoplay playsinline loop></video>
+                        </div>
+                    </div>
+                    <div class="metadata-panel">
+                        <div class="card">
+                            <h3>Generated Thumbnail</h3>
+                            <div class="thumbnail-container">
+                                <img id="thumbnail-image" src="" alt="Generated Video Thumbnail">
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h3>YouTube Metadata</h3>
+                            <div class="metadata-field">
+                                <label>Video Title</label>
+                                <div id="video-title" class="value"></div>
+                            </div>
+                            <div class="metadata-field">
+                                <label>Video Description</label>
+                                <div id="video-description" class="value" style="max-height: 200px; overflow-y: auto;"></div>
+                            </div>
+                            <div class="metadata-field tags">
+                                <label>Video Tags</label>
+                                <div id="video-tags" class="value"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <div id="toast" class="toast"></div>
+
+<script>
+    const TASK_ID = "{{ task_id }}";
+
+    function showToast(message) {
+        const toast = document.getElementById('toast');
+        toast.textContent = message;
+        toast.classList.add('show');
+        setTimeout(() => { toast.classList.remove('show'); }, 3000);
+    }
+
+    function displayResults(data) {
+        document.getElementById('loader').classList.add('hidden');
+        document.getElementById('results').classList.remove('hidden');
+
+        // Populate video player
+        const videoPlayer = document.getElementById('video-player');
+        videoPlayer.src = data.video_url;
+        videoPlayer.poster = data.thumbnail_url;
+
+        // Populate thumbnail
+        document.getElementById('thumbnail-image').src = data.thumbnail_url;
+
+        // Populate metadata
+        const metadata = data.metadata;
+        document.getElementById('video-title').textContent = metadata.title;
+        document.getElementById('video-description').textContent = metadata.description;
+        
+        const tagsContainer = document.getElementById('video-tags');
+        tagsContainer.innerHTML = '';
+        if (metadata.tags && metadata.tags.length > 0) {
+            metadata.tags.forEach(tag => {
+                const tagEl = document.createElement('span');
+                tagEl.className = 'tag';
+                tagEl.textContent = tag;
+                tagsContainer.appendChild(tagEl);
+            });
+        }
+    }
+
+    async function checkStatus() {
+        if (!TASK_ID || TASK_ID === 'N/A') {
+            document.getElementById('status-message').textContent = 'Error: Invalid Task ID.'; 
+            return;
+        }
+        try {
+            const response = await fetch(`/check_result/${TASK_ID}`);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+
+            if (data.status === 'processing' || data.status === 'pending' || data.status === 'progress') {
+                document.getElementById('status-message').textContent = data.message;
+                setTimeout(checkStatus, 3000); // Poll every 3 seconds
+            } else if (data.status === 'ready') {
+                document.title = 'Your Video is Ready!';
+                displayResults(data);
+            } else if (data.status === 'error') {
+                document.getElementById('status-message').textContent = `❌ Error: ${data.message}`;
+            }
+        } catch (error) {
+            console.error("Fetch error:", error);
+            document.getElementById('status-message').textContent = 'Network Error: Could not fetch results.';
+        }
+    }
+    
+    window.onload = checkStatus;
+</script>
+</body>
+</html>
