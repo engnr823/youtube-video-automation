@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI YouTube Video Suite</title>
+    <style>
+        :root {
+            --primary-color: #4f46e5;
+            --background-color: #f8fafc;
+            --form-background: #ffffff;
+            --text-color: #1e293b;
+            --label-color: #475569;
+            --border-color: #cbd5e1;
+            --shadow-color: rgba(79, 70, 229, 0.1);
+        }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 2rem;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+        }
+        .container {
+            background: var(--form-background);
+            padding: 2.5rem;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px var(--shadow-color);
+            border: 1px solid var(--border-color);
+            width: 100%;
+            max-width: 700px;
+        }
+        header h1 {
+            text-align: center;
+            color: var(--primary-color);
+            font-size: 2rem;
+            margin: 0 0 0.5rem 0;
+        }
+        header p {
+            text-align: center;
+            color: var(--label-color);
+            margin-bottom: 2rem;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+        fieldset {
+            border: 1px solid var(--border-color);
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin: 0;
+        }
+        legend {
+            padding: 0 0.5rem;
+            font-weight: 600;
+            color: var(--primary-color);
+        }
+        label {
+            font-weight: 500;
+            display: block;
+            margin-bottom: 0.5rem;
+            color: var(--label-color);
+        }
+        input[type="text"],
+        input[type="url"],
+        textarea,
+        select {
+            width: 100%;
+            padding: 0.8rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            box-sizing: border-box;
+            font-size: 1rem;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            background-color: #fff;
+        }
+        input:focus,
+        textarea:focus,
+        select:focus {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px var(--shadow-color);
+            outline: none;
+        }
+        button {
+            background-image: linear-gradient(to right, #4f46e5, #6d28d9);
+            color: white;
+            padding: 1rem 1.25rem;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            font-weight: 600;
+            width: 100%;
+            margin-top: 1rem;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(79, 70, 229, 0.2);
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(79, 70, 229, 0.3);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>AI YouTube Video Suite</h1>
+            <p>Enter a keyword to automatically generate a complete, monetizable YouTube video.</p>
+        </header>
+
+        <form action="/generate" method="post">
+            <fieldset>
+                <legend>Core Video Concept</legend>
+                <label for="keyword">Target Keyword / Video Topic (Required)</label>
+                <input type="text" id="keyword" name="keyword" placeholder="e.g., how to invest in real estate in Pakistan" required>
+            </fieldset>
+
+            <fieldset>
+                <legend>🎬 Video Production Style</legend>
+                <div>
+                    <label for="video_style">Visual Style Guide</label>
+                    <input type="text" id="video_style" name="video_style" placeholder="e.g., Cinematic, realistic, 4K, documentary style">
+                </div>
+                <div style="margin-top: 1rem;">
+                    <label for="voice_selection">Voiceover Selection</label>
+                    <select id="voice_selection" name="voice_selection">
+                        <option value="Rachel">Rachel (Calm, American)</option>
+                        <option value="Adam">Adam (Deep, British)</option>
+                        <option value="Antoni">Antoni (Well-rounded, American)</option>
+                        <option value="Bella">Bella (Youthful, American)</option>
+                        <option value="Domi">Domi (Assertive, Polish)</option>
+                        <option value="Arnold">Arnold (Narrative, American)</option>
+                    </select>
+                </div>
+            </fieldset>
+
+            <fieldset>
+                <legend>Optional Enhancements</legend>
+                <div>
+                    <label for="author_name">Author/Brand Name (for branding)</label>
+                    <input type="text" id="author_name" name="author_name" placeholder="e.g., Naseem Aslam">
+                </div>
+            </fieldset>
+
+            <button type="submit">✨ Generate Video</button>
+        </form>
+    </div>
+</body>
+</html>
