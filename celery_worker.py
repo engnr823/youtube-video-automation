@@ -1,5 +1,5 @@
 # ===================================================================
-# ===== ✅ YOUTUBE AUTOMATION WORKER V1.1 (COMPLETE & CORRECTED) ====
+# ===== ✅ YOUTUBE AUTOMATION WORKER V1.2 (REPLICATE INTEGRATED) ===
 # ===================================================================
 import os
 import logging
@@ -36,6 +36,14 @@ if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.
     logging.info("✅ Cloudinary configured successfully.")
 else:
     logging.warning("🔴 WARNING: Cloudinary credentials not fully set. Image/video uploads will fail.")
+
+# ===================================================================
+# ===== ✅ REAL API CLIENT IMPORTS ==================================
+# ===================================================================
+
+# These lines assume you have created the client files as we discussed.
+from video_clients.elevenlabs_client import generate_voiceover_and_upload
+from video_clients.replicate_client import generate_video_scene_with_replicate
 
 # ===================================================================
 # ===== ✅ HELPER FUNCTIONS (COPIED FROM FOUNDATION CODE) ==========
@@ -76,7 +84,7 @@ def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: 
         raise Exception("OpenAI client not initialized.")
     if prompt_content.startswith("ERROR:"):
         raise FileNotFoundError(prompt_content)
-    
+
     response_format = {"type": "json_object"} if is_json else {"type": "text"}
     try:
         completion = openai_client.chat.completions.create(
@@ -115,30 +123,6 @@ def generate_and_save_image(article_title: str, detailed_description: str) -> Op
         return None
 
 # ===================================================================
-# ===== ✅ PLACEHOLDER API CLIENTS (REPLACE WITH REAL LOGIC) =======
-# ===================================================================
-
-def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
-    """
-    ## TODO: REPLACE THIS WITH YOUR REAL ELEVENLABS API LOGIC.
-    This is a placeholder that returns a fake URL for testing.
-    """
-    logging.info(f"--- PLACEHOLDER: Generating voiceover for script (first 50 chars): '{script[:50]}...'")
-    # In your real function, you would call the ElevenLabs API, get the audio bytes,
-    # save to a temp file, and upload to Cloudinary, returning the secure_url.
-    return "https://res.cloudinary.com/demo/video/upload/v1689235924/samples/elephants.mp3" # Fake URL
-
-def generate_video_scene_and_upload(prompt: str, duration: int) -> str:
-    """
-    ## TODO: REPLACE THIS WITH YOUR REAL LUMA/RUNWAY/Pika API LOGIC.
-    This is a placeholder that returns a fake URL for testing.
-    """
-    logging.info(f"--- PLACEHOLDER: Generating video scene for prompt: '{prompt[:50]}...'")
-    # In your real function, you would call your chosen video API, wait for the result,
-    # and return the final URL of the generated MP4 file.
-    return "https://res.cloudinary.com/demo/video/upload/v1689235924/samples/elephants.mp4" # Fake URL
-
-# ===================================================================
 # ===== ✅ NEW VIDEO AGENT FUNCTIONS ================================
 # ===================================================================
 
@@ -160,7 +144,7 @@ def create_video_storyboard_agent(keyword: str, form_data: dict) -> dict:
 
 def video_assembly_agent(scene_urls: list, voiceover_url: str) -> str:
     logging.info("Invoking Video Assembly Agent (FFMPEG)...")
-    
+
     local_scene_paths = []
     # 1. Download all assets with timeouts
     try:
@@ -172,7 +156,7 @@ def video_assembly_agent(scene_urls: list, voiceover_url: str) -> str:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
             local_scene_paths.append(local_path)
-        
+
         local_voiceover_path = f"/tmp/voiceover_{uuid.uuid4()}.mp3"
         with requests.get(voiceover_url, stream=True, timeout=300) as r:
             r.raise_for_status()
@@ -187,7 +171,7 @@ def video_assembly_agent(scene_urls: list, voiceover_url: str) -> str:
                 f.write(f"file '{path}'\n")
 
         output_file_path = f"/tmp/final_{uuid.uuid4()}.mp4"
-        
+
         # 3. CORRECTED & ROBUST FFMPEG COMMAND
         cmd = [
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file_path,
@@ -199,13 +183,13 @@ def video_assembly_agent(scene_urls: list, voiceover_url: str) -> str:
             "-shortest",            # Finish encoding when the shortest stream (video) ends
             output_file_path
         ]
-        
+
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         logging.info("✅ FFMPEG stitching complete.")
 
         # 4. Upload final video to Cloudinary
         upload_result = cloudinary.uploader.upload(output_file_path, resource_type="video")
-        
+
         logging.info(f"✅ Final video uploaded: {upload_result['secure_url']}")
         return upload_result['secure_url']
 
@@ -225,7 +209,7 @@ def generate_thumbnail_agent(storyboard: dict) -> str:
     image_prompt_str = load_prompt_template("prompt_image_synthesizer.txt")
     image_prompt_template = Template(image_prompt_str)
     final_image_prompt = image_prompt_template.safe_substitute(article_summary=summary)
-    
+
     return generate_and_save_image(storyboard['video_title'], final_image_prompt)
 
 def youtube_metadata_agent(full_script: str, keyword: str) -> dict:
@@ -255,21 +239,23 @@ def background_generate_video(self, form_data):
         update_status("Initializing...", 0)
         keyword = form_data.get("keyword")
         if not keyword: raise ValueError("Keyword is required.")
-        
+
         # --- Step 1: Create Video Storyboard ---
         update_status("Generating video storyboard...", 1)
         storyboard = create_video_storyboard_agent(keyword, form_data)
-        
+
         # --- Step 2: Parallel Asset Generation ---
         update_status("Generating voiceover & video scenes...", 2)
         full_script = " ".join([scene['audio_narration'] for scene in storyboard['scenes']])
-        
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             voice_id = form_data.get("voice_selection", "Rachel")
             future_voiceover = executor.submit(generate_voiceover_and_upload, full_script, voice_id)
-            
+
+            # --- THIS IS THE KEY CHANGE ---
+            # We now call the new Replicate client function.
             future_scenes = {
-                executor.submit(generate_video_scene_and_upload, scene['visual_prompt'], scene['duration_seconds']): i
+                executor.submit(generate_video_scene_with_replicate, scene['visual_prompt'], scene['duration_seconds']): i
                 for i, scene in enumerate(storyboard['scenes'])
             }
 
@@ -281,16 +267,16 @@ def background_generate_video(self, form_data):
                 except Exception as exc:
                     logging.error(f"A scene generation task failed: {exc}")
                     # Handle failure, maybe by using a placeholder clip or stopping
-            
+
             voiceover_url = future_voiceover.result()
 
         if None in scene_urls or not voiceover_url:
             raise RuntimeError("Failed to generate one or more media assets.")
-            
+
         # --- Step 3: Video Assembly ---
         update_status("Assembling final video with FFMPEG...", 3)
         final_video_url = video_assembly_agent(scene_urls, voiceover_url)
-        
+
         # --- Step 4: Thumbnail Generation ---
         update_status("Generating AI thumbnail...", 4)
         thumbnail_url = generate_thumbnail_agent(storyboard)
@@ -298,7 +284,7 @@ def background_generate_video(self, form_data):
         # --- Step 5: YouTube Metadata Generation ---
         update_status("Generating YouTube title & description...", 5)
         metadata = youtube_metadata_agent(full_script, keyword)
-        
+
         # --- Step 6: Final Payload Assembly ---
         update_status("Assembling final payload...", 6)
         final_payload = {
