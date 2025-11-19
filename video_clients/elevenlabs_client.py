@@ -41,7 +41,7 @@ def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
         # This structure is the modern way to call TTS.
         audio_bytes = client.text_to_speech.convert(
             text=script,
-            voice=voice_id,
+            voice_id=voice_id,
             model_id="eleven_multilingual_v2"
         )
 
