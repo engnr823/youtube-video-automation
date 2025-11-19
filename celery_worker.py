@@ -1,9 +1,9 @@
 # ===================================================================
-# ===== ✅ YOUTUBE AUTOMATION WORKER V1.2 (REPLICATE INTEGRATED) ===
+# ===== ✅ YOUTUBE AUTOMATION WORKER V2.0 (SAFE MODE & LOGGING) ===
 # ===================================================================
 import os
+import sys
 import logging
-import concurrent.futures
 import json
 import re
 import traceback
@@ -18,12 +18,18 @@ from celery_init import celery
 from openai import OpenAI
 
 # --- Global Configurations & Client Initialization ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] (WORKER): %(message)s")
+# Configure logging to output to STDOUT so Railway captures it immediately
+logging.basicConfig(
+    level=logging.INFO, 
+    format="%(asctime)s [%(levelname)s] (WORKER): %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 if not OPENAI_API_KEY:
     logging.error("🔴 CRITICAL: OPENAI_API_KEY is not configured.")
-    # You might want to raise an exception here or handle it gracefully
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.getenv("CLOUDINARY_API_SECRET")]):
@@ -41,12 +47,11 @@ else:
 # ===== ✅ REAL API CLIENT IMPORTS ==================================
 # ===================================================================
 
-# These lines assume you have created the client files as we discussed.
 from video_clients.elevenlabs_client import generate_voiceover_and_upload
 from video_clients.replicate_client import generate_video_scene_with_replicate
 
 # ===================================================================
-# ===== ✅ HELPER FUNCTIONS (COPIED FROM FOUNDATION CODE) ==========
+# ===== ✅ HELPER FUNCTIONS =========================================
 # ===================================================================
 
 def load_prompt_template(filename: str) -> str:
@@ -61,12 +66,14 @@ def load_prompt_template(filename: str) -> str:
 def extract_json_from_text(text: str) -> Optional[dict]:
     if not isinstance(text, str):
         return None
+    # Try to find JSON block
     match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group(1))
         except json.JSONDecodeError:
             pass
+    # Try parsing raw text
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -123,7 +130,7 @@ def generate_and_save_image(article_title: str, detailed_description: str) -> Op
         return None
 
 # ===================================================================
-# ===== ✅ NEW VIDEO AGENT FUNCTIONS ================================
+# ===== ✅ VIDEO AGENT FUNCTIONS ====================================
 # ===================================================================
 
 def create_video_storyboard_agent(keyword: str, form_data: dict) -> dict:
@@ -135,11 +142,18 @@ def create_video_storyboard_agent(keyword: str, form_data: dict) -> dict:
         competitor_analysis_summary="(Competitor analysis can be added here)",
         video_style_guide=form_data.get("video_style", "Cinematic, realistic, 4K")
     )
+    
+    # Get response from OpenAI
     response_str = get_openai_response(prompt, temperature=0.5, is_json=True)
+    
+    # --- 🔍 DEBUG LOGGING: SEE THE SCRIPT ---
+    logging.info(f"📝 RAW OPENAI STORYBOARD RESPONSE:\n{response_str}")
+    
     storyboard = extract_json_from_text(response_str)
     if not storyboard or "scenes" not in storyboard:
         raise ValueError("Storyboard generation failed or returned invalid format.")
-    logging.info("✅ Video Storyboard created successfully.")
+    
+    logging.info(f"✅ Video Storyboard created successfully. Scenes found: {len(storyboard['scenes'])}")
     return storyboard
 
 def video_assembly_agent(scene_urls: list, voiceover_url: str) -> str:
@@ -149,7 +163,13 @@ def video_assembly_agent(scene_urls: list, voiceover_url: str) -> str:
     # 1. Download all assets with timeouts
     try:
         for i, url in enumerate(scene_urls):
+            if not url: 
+                logging.warning(f"⚠️ Scene {i} URL is empty, skipping download.")
+                continue
+                
             local_path = f"/tmp/scene_{i}_{uuid.uuid4()}.mp4"
+            logging.info(f"Downloading scene {i} from {url}...")
+            
             with requests.get(url, stream=True, timeout=300) as r:
                 r.raise_for_status()
                 with open(local_path, 'wb') as f:
@@ -157,7 +177,11 @@ def video_assembly_agent(scene_urls: list, voiceover_url: str) -> str:
                         f.write(chunk)
             local_scene_paths.append(local_path)
 
+        if not voiceover_url:
+            raise ValueError("Voiceover URL is missing for assembly.")
+
         local_voiceover_path = f"/tmp/voiceover_{uuid.uuid4()}.mp3"
+        logging.info("Downloading voiceover...")
         with requests.get(voiceover_url, stream=True, timeout=300) as r:
             r.raise_for_status()
             with open(local_voiceover_path, 'wb') as f:
@@ -165,6 +189,9 @@ def video_assembly_agent(scene_urls: list, voiceover_url: str) -> str:
                     f.write(chunk)
 
         # 2. Create ffmpeg concat file list
+        if not local_scene_paths:
+            raise ValueError("No valid video scenes found to assemble.")
+
         concat_file_path = f"/tmp/concat_{uuid.uuid4()}.txt"
         with open(concat_file_path, "w") as f:
             for path in local_scene_paths:
@@ -172,18 +199,23 @@ def video_assembly_agent(scene_urls: list, voiceover_url: str) -> str:
 
         output_file_path = f"/tmp/final_{uuid.uuid4()}.mp4"
 
-        # 3. CORRECTED & ROBUST FFMPEG COMMAND
+        # 3. SAFER FFMPEG COMMAND (FIXES BLACK SCREEN ISSUES)
+        # We use a filter complex to force scale all inputs to 16:9 (1024x576 is standard for Zeroscope)
+        # 'setsar=1' fixes aspect ratio issues.
         cmd = [
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file_path,
+            "ffmpeg", "-y", 
+            "-f", "concat", "-safe", "0", "-i", concat_file_path,
             "-i", local_voiceover_path,
-            "-c:v", "libx264",      # Re-encode video to a standard format
-            "-pix_fmt", "yuv420p",    # Ensures max player compatibility
-            "-preset", "fast",        # Good balance of speed and quality
-            "-c:a", "aac",          # Standard audio codec
-            "-shortest",            # Finish encoding when the shortest stream (video) ends
+            "-vf", "scale=1024:576:force_original_aspect_ratio=decrease,pad=1024:576:(ow-iw)/2:(oh-ih)/2,setsar=1", 
+            "-c:v", "libx264",      
+            "-pix_fmt", "yuv420p",    
+            "-preset", "fast",       
+            "-c:a", "aac",          
+            "-shortest",            
             output_file_path
         ]
 
+        logging.info(f"Running FFMPEG Command: {' '.join(cmd)}")
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         logging.info("✅ FFMPEG stitching complete.")
 
@@ -224,7 +256,7 @@ def youtube_metadata_agent(full_script: str, keyword: str) -> dict:
     return metadata
 
 # ===================================================================
-# ===== ✅ NEW MAIN VIDEO GENERATION TASK ===========================
+# ===== ✅ MAIN VIDEO GENERATION TASK (SAFE MODE ENABLED) ===========
 # ===================================================================
 
 @celery.task(bind=True)
@@ -234,6 +266,7 @@ def background_generate_video(self, form_data):
 
     def update_status(message, step):
         self.update_state(state='PROGRESS', meta={'status': 'processing', 'message': f"Step {step}/{total_steps}: {message}"})
+        logging.info(f"➡️  STATUS UPDATE: Step {step}/{total_steps}: {message}")
 
     try:
         update_status("Initializing...", 0)
@@ -244,34 +277,46 @@ def background_generate_video(self, form_data):
         update_status("Generating video storyboard...", 1)
         storyboard = create_video_storyboard_agent(keyword, form_data)
 
-        # --- Step 2: Parallel Asset Generation ---
-        update_status("Generating voiceover & video scenes...", 2)
+        # --- Step 2: Sequential Asset Generation (Cost-Safe Mode) ---
+        update_status("Generating voiceover & scenes sequentially...", 2)
+        
+        # 1. Generate Voiceover First (Cheapest Asset)
         full_script = " ".join([scene['audio_narration'] for scene in storyboard['scenes']])
+        voice_id = form_data.get("voice_selection", "Rachel")
+        
+        logging.info(f"🎤 Generating full voiceover ({len(full_script)} chars)...")
+        voiceover_url = generate_voiceover_and_upload(full_script, voice_id)
+        if not voiceover_url:
+             raise RuntimeError("Voiceover generation failed. Stopping before video generation.")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            voice_id = form_data.get("voice_selection", "Rachel")
-            future_voiceover = executor.submit(generate_voiceover_and_upload, full_script, voice_id)
+        # 2. Generate Video Scenes ONE BY ONE (To prevent mass failures)
+        scene_urls = [None] * len(storyboard['scenes'])
+        
+        for i, scene in enumerate(storyboard['scenes']):
+            logging.info(f"🎬 Generating Scene {i+1}/{len(storyboard['scenes'])}...")
+            logging.info(f"   Prompt: {scene['visual_prompt'][:50]}...") # Log preview of prompt
+            
+            # Call Replicate specifically for this scene
+            try:
+                video_url = generate_video_scene_with_replicate(
+                    scene['visual_prompt'], 
+                    scene['duration_seconds']
+                )
+                
+                if not video_url:
+                    logging.error(f"❌ Scene {i+1} returned no URL. Stopping generation to save credits.")
+                    # CRITICAL: Break the loop to stop spending money on broken prompts
+                    raise RuntimeError(f"Scene {i+1} generation failed.")
+                
+                scene_urls[i] = video_url
+                logging.info(f"✅ Scene {i+1} URL: {video_url}")
+                
+            except Exception as exc:
+                logging.error(f"❌ Error generating Scene {i+1}: {exc}")
+                raise RuntimeError(f"Failed to generate Scene {i+1}: {exc}")
 
-            # --- THIS IS THE KEY CHANGE ---
-            # We now call the new Replicate client function.
-            future_scenes = {
-                executor.submit(generate_video_scene_with_replicate, scene['visual_prompt'], scene['duration_seconds']): i
-                for i, scene in enumerate(storyboard['scenes'])
-            }
-
-            scene_urls = [None] * len(storyboard['scenes'])
-            for future in concurrent.futures.as_completed(future_scenes):
-                index = future_scenes[future]
-                try:
-                    scene_urls[index] = future.result()
-                except Exception as exc:
-                    logging.error(f"A scene generation task failed: {exc}")
-                    # Handle failure, maybe by using a placeholder clip or stopping
-
-            voiceover_url = future_voiceover.result()
-
-        if None in scene_urls or not voiceover_url:
-            raise RuntimeError("Failed to generate one or more media assets.")
+        if None in scene_urls:
+            raise RuntimeError("One or more scenes failed to generate.")
 
         # --- Step 3: Video Assembly ---
         update_status("Assembling final video with FFMPEG...", 3)
@@ -295,9 +340,12 @@ def background_generate_video(self, form_data):
             "storyboard": storyboard,
             "form_data": form_data
         }
+        
+        logging.info("✅✅ TASK COMPLETE: Video Generated Successfully.")
         return final_payload
 
     except Exception as e:
         logging.error(f"[{task_id}] A critical error occurred:\n{traceback.format_exc()}")
         self.update_state(state='FAILURE', meta={'status': 'error', 'message': f"❌ An unexpected error occurred: {e}"})
+        # We re-raise to ensure Celery marks it as failed
         raise
