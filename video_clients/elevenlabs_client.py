@@ -35,20 +35,19 @@ def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
 
     logging.info(f"Generating voiceover with voice: {voice_id}...")
 
+    # Define filename early to ensure it exists for the finally block
+    temp_filename = f"/tmp/voiceover_{uuid.uuid4()}.mp3"
+
     try:
-        # 1. Generate audio bytes from ElevenLabs
-        # Note: Using the modern 'text_to_speech.convert' method
-        # generator returns an iterator, so we must consume it to write bytes
+        # 1. Generate audio stream from ElevenLabs
+        # Using the modern 'text_to_speech.convert' method which returns a generator
         audio_generator = client.text_to_speech.convert(
             text=script,
             voice_id=voice_id,
             model_id="eleven_multilingual_v2"
         )
 
-        # 2. Save audio bytes to a temporary file
-        temp_filename = f"/tmp/voiceover_{uuid.uuid4()}.mp3"
-        
-        # Consume the generator to write the file
+        # 2. Consume the generator and write bytes to the temporary file
         with open(temp_filename, 'wb') as f:
             for chunk in audio_generator:
                 f.write(chunk)
@@ -72,6 +71,6 @@ def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
         raise
     finally:
         # 4. Clean up the temporary file
-        if 'temp_filename' in locals() and os.path.exists(temp_filename):
+        if os.path.exists(temp_filename):
             os.remove(temp_filename)
             logging.info(f"Cleaned up temporary file: {temp_filename}")
