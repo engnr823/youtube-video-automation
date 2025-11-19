@@ -1,5 +1,5 @@
 # ===================================================================
-# ===== ✅ YOUTUBE AUTOMATION WORKER V2.0 (SAFE MODE & LOGGING) ===
+# ===== ✅ YOUTUBE AUTOMATION WORKER V2.1 (FIXED VOICE MAP) ========
 # ===================================================================
 import os
 import sys
@@ -282,9 +282,22 @@ def background_generate_video(self, form_data):
         
         # 1. Generate Voiceover First (Cheapest Asset)
         full_script = " ".join([scene['audio_narration'] for scene in storyboard['scenes']])
-        voice_id = form_data.get("voice_selection", "Rachel")
         
-        logging.info(f"🎤 Generating full voiceover ({len(full_script)} chars)...")
+        # --- 🔍 FIX: Map Friendly Voice Names to UUIDs ---
+        voice_map = {
+            "Rachel": "21m00Tcm4TlvDq8ikWAM",
+            "Adam": "pNInz6obpgDQGcFmaJgB",
+            "Antoni": "ErXwobaYiN019PkySvjV",
+            "Bella": "EXAVITQu4vr4xnSDxMaL",
+            "Domi": "AZnzlk1XvdvUeBnXmlld",
+            "Arnold": "VR6AewLTigWG4xSOukaG"
+        }
+        
+        selected_voice_name = form_data.get("voice_selection", "Rachel")
+        # Default to Rachel's ID if name not found
+        voice_id = voice_map.get(selected_voice_name, "21m00Tcm4TlvDq8ikWAM") 
+        
+        logging.info(f"🎤 Generating full voiceover using ID {voice_id} ({len(full_script)} chars)...")
         voiceover_url = generate_voiceover_and_upload(full_script, voice_id)
         if not voiceover_url:
              raise RuntimeError("Voiceover generation failed. Stopping before video generation.")
