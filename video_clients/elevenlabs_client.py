@@ -36,10 +36,10 @@ def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
     logging.info(f"Generating voiceover with voice: {voice_id}...")
 
     try:
-        # NEW (Correction for SDK change):
-        # The lines below are now correctly indented by 4 spaces.
-        # This structure is the modern way to call TTS.
-        audio_bytes = client.text_to_speech.convert(
+        # 1. Generate audio bytes from ElevenLabs
+        # Note: Using the modern 'text_to_speech.convert' method
+        # generator returns an iterator, so we must consume it to write bytes
+        audio_generator = client.text_to_speech.convert(
             text=script,
             voice_id=voice_id,
             model_id="eleven_multilingual_v2"
@@ -47,8 +47,11 @@ def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
 
         # 2. Save audio bytes to a temporary file
         temp_filename = f"/tmp/voiceover_{uuid.uuid4()}.mp3"
+        
+        # Consume the generator to write the file
         with open(temp_filename, 'wb') as f:
-            f.write(audio_bytes)
+            for chunk in audio_generator:
+                f.write(chunk)
 
         # 3. Upload the temporary file to Cloudinary
         logging.info(f"Uploading voiceover '{temp_filename}' to Cloudinary...")
