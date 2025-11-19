@@ -37,13 +37,13 @@ def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
 
     try:
         # NEW (Correction for SDK change):
-# Note: The exact method name might vary slightly depending on your installed SDK version.
-# This structure is the modern way to call TTS.
-audio_bytes = client.text_to_speech.convert(
-    text=script,
-    voice=voice_id,
-    model_id="eleven_multilingual_v2"
-)
+        # The lines below are now correctly indented by 4 spaces.
+        # This structure is the modern way to call TTS.
+        audio_bytes = client.text_to_speech.convert(
+            text=script,
+            voice=voice_id,
+            model_id="eleven_multilingual_v2"
+        )
 
         # 2. Save audio bytes to a temporary file
         temp_filename = f"/tmp/voiceover_{uuid.uuid4()}.mp3"
