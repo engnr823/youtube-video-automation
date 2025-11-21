@@ -1,13 +1,9 @@
 # nixpacks.toml
-
 [phases.setup]
-# "..." includes the default packages (Python, etc).
-# We add "ffmpeg" to the list.
-nixPkgs = ["...", "ffmpeg"]
+nixPkgs = ["python311", "ffmpeg"]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-# Ensure this matches the command you want to run
 cmd = "celery -A celery_init worker --loglevel=info --concurrency=2"
