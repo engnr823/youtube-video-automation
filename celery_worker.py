@@ -1,5 +1,5 @@
 # ===================================================================
-# ===== ✅ YOUTUBE AUTOMATION WORKER V3.0 (DRAMA/CONSISTENCY) =====
+# ===== ✅ YOUTUBE AUTOMATION WORKER V3.1 (TYPE FIX) ===============
 # ===================================================================
 import os
 import sys
@@ -18,7 +18,6 @@ from celery_init import celery
 from openai import OpenAI
 
 # --- IMPORTS FOR CONSISTENCY PIPELINE ---
-# We need 'replicate' directly here for the Image Generation step
 import replicate 
 
 # --- Global Configurations & Client Initialization ---
@@ -38,7 +37,7 @@ if not OPENAI_API_KEY:
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 if not REPLICATE_API_TOKEN:
-    logging.error("🔴 CRITICAL: REPLICATE_API_TOKEN is not configured. Video generation will fail.")
+    logging.error("🔴 CRITICAL: REPLICATE_API_TOKEN is not configured.")
 
 if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.getenv("CLOUDINARY_API_SECRET")]):
     cloudinary.config(
@@ -49,14 +48,13 @@ if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.
     )
     logging.info("✅ Cloudinary configured successfully.")
 else:
-    logging.warning("🔴 WARNING: Cloudinary credentials not fully set. Image/video uploads will fail.")
+    logging.warning("🔴 WARNING: Cloudinary credentials not fully set.")
 
 # ===================================================================
 # ===== ✅ CLIENT IMPORTS ===========================================
 # ===================================================================
 
 from video_clients.elevenlabs_client import generate_voiceover_and_upload
-# Ensure your replicate_client.py is updated to accept 'image_url'
 from video_clients.replicate_client import generate_video_scene_with_replicate
 
 # ===================================================================
@@ -104,11 +102,10 @@ def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: 
 def generate_flux_image(prompt: str) -> str:
     """
     Generates a high-quality keyframe image using Flux Schnell on Replicate.
-    This is crucial for 'Drama' consistency before animating.
+    STRICTLY returns a string URL.
     """
     logging.info(f"📸 Generating FLUX Keyframe for: {prompt[:50]}...")
     try:
-        # Using Flux Schnell (Fast & Cheap, Great Quality)
         output = replicate.run(
             "black-forest-labs/flux-schnell",
             input={
@@ -118,8 +115,10 @@ def generate_flux_image(prompt: str) -> str:
                 "output_quality": 90
             }
         )
-        # Flux returns a list of outputs [url, ...]
-        image_url = output[0]
+        # --- 🔴 THE FIX IS HERE: Force conversion to string ---
+        # Replicate returns a FileOutput object, we must cast it to str()
+        image_url = str(output[0])
+        
         logging.info(f"✅ Keyframe Image Ready: {image_url}")
         return image_url
     except Exception as e:
@@ -127,7 +126,6 @@ def generate_flux_image(prompt: str) -> str:
         raise RuntimeError(f"Flux Image Gen Failed: {e}")
 
 def generate_and_save_image(article_title: str, detailed_description: str) -> Optional[str]:
-    # This is for THUMBNAILS only (DALL-E 3)
     if not openai_client: return None
     try:
         response = openai_client.images.generate(model="dall-e-3", prompt=detailed_description, size="1024x1024", quality="standard", n=1)
@@ -153,7 +151,7 @@ def create_video_storyboard_agent(keyword: str, form_data: dict) -> dict:
     response_str = get_openai_response(prompt, temperature=0.5, is_json=True)
     storyboard = extract_json_from_text(response_str)
     if not storyboard or "scenes" not in storyboard:
-        raise ValueError("Storyboard generation failed or invalid format.")
+        raise ValueError("Storyboard generation failed.")
     return storyboard
 
 def video_assembly_agent(scene_urls: list, voiceover_url: str) -> str:
@@ -184,7 +182,6 @@ def video_assembly_agent(scene_urls: list, voiceover_url: str) -> str:
         output_file_path = f"/tmp/final_{uuid.uuid4()}.mp4"
 
         # 3. UPDATED FFMPEG COMMAND FOR HD (1280x720)
-        # This ensures the video is standard 720p HD, which works best with Wan/Luma/Runway
         cmd = [
             "ffmpeg", "-y", 
             "-f", "concat", "-safe", "0", "-i", concat_file_path,
@@ -259,9 +256,7 @@ def background_generate_video(self, form_data):
         # --- Step 3: THE CONSISTENCY LOOP (Image -> Video) ---
         update_status("Generating consistent scenes (Image -> Video)...", 3)
         
-        # 1. Get the Master Character Profile (Fallbacks included)
         character_profile = storyboard.get('main_character_profile', 'A cinematic, photorealistic person')
-        
         scene_urls = [None] * len(storyboard['scenes'])
         
         for i, scene in enumerate(storyboard['scenes']):
@@ -269,20 +264,19 @@ def background_generate_video(self, form_data):
             
             try:
                 # A. Construct Consistency Prompt
-                # We combine the Character Profile + The Scene Setting
                 visual_setting = scene.get('visual_setting', scene.get('visual_prompt', ''))
                 full_image_prompt = f"{character_profile}, {visual_setting}, 8k, cinematic lighting, photorealistic"
                 
                 # B. Generate Keyframe Image (FLUX)
+                # This will now safely return a STRING because of our fix above
                 keyframe_url = generate_flux_image(full_image_prompt)
                 
                 # C. Animate Image (WAN 2.1)
-                # We pass the image_url to the updated replicate client
                 action = scene.get('action_prompt', 'subtle cinematic movement')
                 
                 video_url = generate_video_scene_with_replicate(
                     prompt=action,
-                    image_url=keyframe_url # PASSING THE IMAGE IS KEY FOR CONSISTENCY
+                    image_url=keyframe_url 
                 )
                 
                 if not video_url:
@@ -293,7 +287,8 @@ def background_generate_video(self, form_data):
                 
             except Exception as exc:
                 logging.error(f"❌ Scene {i+1} Failed: {exc}")
-                raise RuntimeError(f"Scene {i+1} generation failed. Stopping to save credits.")
+                # We stop here to save credits if something fundamental is broken
+                raise RuntimeError(f"Scene {i+1} generation failed.")
 
         # --- Step 4: Assembly ---
         update_status("Assembling final video...", 4)
@@ -317,6 +312,7 @@ def background_generate_video(self, form_data):
         return final_payload
 
     except Exception as e:
+        # We cast 'e' to str() here too, just in case
         logging.error(f"[{task_id}] CRITICAL ERROR: {traceback.format_exc()}")
-        self.update_state(state='FAILURE', meta={'status': 'error', 'message': f"❌ Error: {e}"})
+        self.update_state(state='FAILURE', meta={'status': 'error', 'message': f"❌ Error: {str(e)}"})
         raise
