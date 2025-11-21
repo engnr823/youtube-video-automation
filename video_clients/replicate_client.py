@@ -2,57 +2,39 @@ import os
 import logging
 import replicate
 
-# --- Replicate Client Initialization ---
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
-if not REPLICATE_API_TOKEN:
-    logging.warning("🔴 WARNING: REPLICATE_API_TOKEN is not set. Video generation will fail.")
+# Using Wan 2.1 Image-to-Video (This is much cheaper than Luma/Runway but great quality)
+MODEL_ID = "wan-video/wan-2.1-1.3b"
 
-# The specific identifier for the Zeroscope v2 XL model on Replicate
-# This model is a great, cost-effective choice for text-to-video.
-MODEL_ID = "anotherjesse/zeroscope-v2-xl:9f747673945c62801b13b84701c783929c0ee784e4748ec062204894dda1a351"
-
-def generate_video_scene_with_replicate(prompt: str, duration: int) -> str:
+def generate_video_scene_with_replicate(prompt: str, image_url: str = None) -> str:
     """
-    Generates a video scene using a model on the Replicate platform.
-
-    Args:
-        prompt (str): The visual prompt for the video scene.
-        duration (int): The desired duration of the clip (used to calculate frames).
-
-    Returns:
-        str: The URL of the generated MP4 video file.
+    Generates a video from a source image (Image-to-Video).
     """
     if not REPLICATE_API_TOKEN:
-        raise ConnectionError("Replicate client is not initialized. Please set the REPLICATE_API_TOKEN.")
+        raise ConnectionError("Replicate token missing.")
 
-    logging.info(f"Initiating Replicate video generation for prompt: '{prompt[:70]}...'")
-
-    # This model generates video at 24 frames per second.
-    # We calculate the number of frames needed based on the desired duration.
-    num_frames = duration * 24
+    logging.info(f"🎬 Animating Scene: '{prompt}' from Image...")
 
     try:
-        # Define the input payload for the model
         input_payload = {
-            "prompt": prompt,
-            "num_frames": num_frames,
-            "width": 1024,  # Standard 16:9 aspect ratio width
-            "height": 576, # Standard 16:9 aspect ratio height
+            "prompt": prompt,  # e.g., "Camera pans right, character waves"
+            "negative_prompt": "distortion, morphing, static, low quality",
+            "aspect_ratio": "16:9",
+            "quality": "high"
         }
+        
+        # IF we provided an image (which we should for consistency), add it
+        if image_url:
+            input_payload["image"] = image_url
+            # Wan 2.1 specific parameter for image influence
+            # Some models call it 'start_image' or 'image'. Check Replicate docs for specific model version.
+        
+        output = replicate.run(MODEL_ID, input=input_payload)
 
-        # Run the model on Replicate and wait for the output
-        output_url = replicate.run(
-            MODEL_ID,
-            input=input_payload
-        )
-
-        if not output_url:
-            raise ValueError("Replicate job succeeded but did not return a video URL.")
-
-        logging.info(f"✅ Replicate job succeeded. Video URL: {output_url}")
-        return output_url
+        # Handle output (Wan usually returns a list)
+        video_url = output[0] if isinstance(output, list) else output
+        return video_url
 
     except Exception as e:
-        logging.error(f"🔴 An error occurred during Replicate video generation: {e}")
-        # Reraise the exception to let Celery know the task failed
+        logging.error(f"🔴 Replicate Animation Error: {e}")
         raise
