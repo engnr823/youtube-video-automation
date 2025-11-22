@@ -1,5 +1,5 @@
 # ===================================================================
-# ===== ✅ YOUTUBE AUTOMATION WORKER V4.1 (FULL PARALLEL) ==========
+# ===== ✅ YOUTUBE AUTOMATION WORKER V4.2 (CORRECTED) =============
 # ===================================================================
 import os
 import sys
@@ -19,6 +19,35 @@ from celery_init import celery
 from openai import OpenAI
 import replicate 
 
+# --- Global Configurations & Client Initialization ---
+logging.basicConfig(
+    level=logging.INFO, 
+    format="%(asctime)s [%(levelname)s] (WORKER): %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+# --- SILENCE NOISY LOGS ---
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# --- SAFETY CHECK: IS FFMPEG INSTALLED? ---
+try:
+    # Run the actual command, capture output, text mode
+    result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
+    if result.returncode == 0:
+        # Print just the first line (version info)
+        version_line = result.stdout.split('\n')[0]
+        logging.info(f"✅ FFMPEG CHECK: INSTALLED! ({version_line})")
+    else:
+        logging.error("❌ FFMPEG CHECK: COMMAND FAILED (Return code not 0)")
+except FileNotFoundError:
+    logging.error("❌ FFMPEG CHECK: NOT FOUND! (Please check Aptfile)")
+except Exception as e:
+    logging.error(f"❌ FFMPEG CHECK: ERROR! {e}")
+
+# ... (Rest of the code remains the same) ...
 # --- Global Configurations & Client Initialization ---
 logging.basicConfig(
     level=logging.INFO, 
