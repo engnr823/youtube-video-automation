@@ -1,13 +1,19 @@
 # nixpacks.toml
 
 [phases.setup]
-# Remove "..." to stop default collisions
-# Just ask for python and ffmpeg. 
-# We control the python version via the ENVIRONMENT VARIABLE.
-nixPkgs = ["python", "ffmpeg"]
+# We specify python311 which definitely includes pip
+nixPkgs = ["python311", "ffmpeg", "gcc", "zlib"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+# Nixpacks puts python in a weird place sometimes.
+# We force it to create a virtual environment first.
+cmds = [
+    "python3.11 -m venv /opt/venv",
+    ". /opt/venv/bin/activate",
+    "pip install --upgrade pip",
+    "pip install -r requirements.txt"
+]
 
 [start]
-cmd = "celery -A celery_init worker --loglevel=info --concurrency=2"
+# We must activate the venv before running celery
+cmd = ". /opt/venv/bin/activate && celery -A celery_init worker --loglevel=info --concurrency=2"
