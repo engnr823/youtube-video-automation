@@ -1,15 +1,13 @@
 # nixpacks.toml
 
 [phases.setup]
-# "..." tells Railway to KEEP the default stuff (like pip, gcc)
-# "ffmpeg" adds the video tool
-# "python311" forces the specific python version
-nixPkgs = ["...", "python311", "ffmpeg"]
+# Remove "..." to stop default collisions
+# Just ask for python and ffmpeg. 
+# We control the python version via the ENVIRONMENT VARIABLE.
+nixPkgs = ["python", "ffmpeg"]
 
 [phases.install]
-# Keep the default install logic but ensure requirements are met
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-# Default start command for the worker
 cmd = "celery -A celery_init worker --loglevel=info --concurrency=2"
