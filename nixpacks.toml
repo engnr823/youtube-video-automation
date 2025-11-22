@@ -1,9 +1,13 @@
 # nixpacks.toml
+
 [phases.setup]
-nixPkgs = ["python311", "ffmpeg"]
+# Install Python 3.11 and FFMPEG using the Linux package manager
+nixPkgs = ["python311"]
+aptPkgs = ["ffmpeg"]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
 
 [start]
+# This command starts the Worker automatically
 cmd = "celery -A celery_init worker --loglevel=info --concurrency=2"
