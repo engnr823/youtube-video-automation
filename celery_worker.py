@@ -183,21 +183,33 @@ def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: 
         return ""
 
 def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict) -> dict:
-    # [UPDATED] Use the file-based prompt if available
+    # [UPDATED PROMPT] Explicitly instructs AI to extract Voice IDs from user text
     prompt_template = load_prompt_template("prompt_video_storyboard_creator.txt")
     if not prompt_template:
         prompt_template = """
         You are an expert short film writer.
         BLUEPRINT: $blueprint_json
         TASK: Create an original short film script for '$keyword'.
+        INPUT CONTEXT: $uploaded_assets_context
+        
+        CRITICAL INSTRUCTION FOR CHARACTERS:
+        1. Look closely at the user's character descriptions.
+        2. If the user provided a specific "Voice ID" or code (like "ErXw...") for a character, YOU MUST insert it into the 'voice_id' field for that character.
+        3. If no ID is provided, leave 'voice_id' as null.
+        
         Output valid JSON with keys: video_title, video_description, main_character_profile, characters (list), scenes (list).
-        IMPORTANT: List all speaking characters in 'characters' list with voice_id placeholders if needed.
         """
     
     template = Template(prompt_template)
-    # Safe substitute to prevent crashing on missing keys
+    
+    # We combine the keyword + character details into one big context string
+    # This ensures the AI sees the IDs you typed in the form
+    full_context = keyword
+    if form_data.get("characters"):
+        full_context += f"\n\nUSER DEFINED CHARACTERS:\n{form_data.get('characters')}"
+
     prompt = template.safe_substitute(
-        keyword=keyword,
+        keyword=full_context,
         blueprint_json=json.dumps(blueprint),
         language=form_data.get("language", "english"),
         video_type=form_data.get("video_type", "reel"),
@@ -212,7 +224,6 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
         return StoryboardSchema(**obj).dict()
     except ValidationError:
         return {"video_title": "Untitled", "scenes": obj.get("scenes", []), "characters": obj.get("characters", [])}
-
 # -------------------------
 # [FEATURE] Multi-Voice Logic
 # -------------------------
