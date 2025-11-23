@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI YouTube Video Suite</title>
+    <title>AI YouTube Video Suite 2.0</title>
     <style>
         :root {
             --primary-color: #4f46e5;
@@ -15,9 +15,8 @@
             --shadow-color: rgba(79, 70, 229, 0.1);
         }
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-family: 'Inter', sans-serif;
             background-color: var(--background-color);
-            color: var(--text-color);
             margin: 0;
             padding: 2rem;
             display: flex;
@@ -32,123 +31,145 @@
             box-shadow: 0 10px 40px var(--shadow-color);
             border: 1px solid var(--border-color);
             width: 100%;
-            max-width: 700px;
+            max-width: 820px;
         }
-        header h1 {
+        h1 {
             text-align: center;
             color: var(--primary-color);
-            font-size: 2rem;
-            margin: 0 0 0.5rem 0;
+            margin-bottom: 0.5rem;
         }
-        header p {
+        p.description {
             text-align: center;
             color: var(--label-color);
             margin-bottom: 2rem;
         }
-        form {
-            display: flex;
-            flex-direction: column;
-            gap: 1.5rem;
-        }
         fieldset {
             border: 1px solid var(--border-color);
             padding: 1.5rem;
-            border-radius: 8px;
-            margin: 0;
+            border-radius: 10px;
+            margin-bottom: 1.5rem;
         }
         legend {
-            padding: 0 0.5rem;
             font-weight: 600;
             color: var(--primary-color);
         }
         label {
             font-weight: 500;
             display: block;
-            margin-bottom: 0.5rem;
+            margin-bottom: 0.4rem;
             color: var(--label-color);
         }
-        input[type="text"],
-        input[type="url"],
-        textarea,
-        select {
+        input, textarea, select {
             width: 100%;
             padding: 0.8rem;
             border-radius: 8px;
             border: 1px solid var(--border-color);
-            box-sizing: border-box;
+            background: #fff;
             font-size: 1rem;
-            transition: border-color 0.2s, box-shadow 0.2s;
-            background-color: #fff;
-        }
-        input:focus,
-        textarea:focus,
-        select:focus {
-            border-color: var(--primary-color);
-            box-shadow: 0 0 0 3px var(--shadow-color);
-            outline: none;
+            margin-bottom: 1rem;
         }
         button {
             background-image: linear-gradient(to right, #4f46e5, #6d28d9);
             color: white;
-            padding: 1rem 1.25rem;
-            border: none;
+            padding: 1rem;
             border-radius: 8px;
-            cursor: pointer;
+            width: 100%;
             font-size: 1.1rem;
             font-weight: 600;
-            width: 100%;
-            margin-top: 1rem;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 15px rgba(79, 70, 229, 0.2);
-        }
-        button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(79, 70, 229, 0.3);
+            cursor: pointer;
+            border: none;
         }
     </style>
 </head>
+
 <body>
     <div class="container">
-        <header>
-            <h1>AI YouTube Video Suite</h1>
-            <p>Enter a keyword to automatically generate a complete, monetizable YouTube video.</p>
-        </header>
+        <h1>AI Short Film & YouTube Video Generator</h1>
+        <p class="description">Generate complete videos using keywords, characters, and AI voiceovers.</p>
 
-        <form action="/generate" method="post">
+        <form action="/generate" method="post" enctype="multipart/form-data">
+
+            <!-- Core Concept -->
             <fieldset>
-                <legend>Core Video Concept</legend>
-                <label for="keyword">Target Keyword / Video Topic (Required)</label>
-                <input type="text" id="keyword" name="keyword" placeholder="e.g., how to invest in real estate in Pakistan" required>
+                <legend>🎬 Core Video Concept</legend>
+
+                <label for="keyword">Primary Keyword / Topic</label>
+                <input type="text" id="keyword" name="keyword"
+                       placeholder="e.g., sacrifice story, emotional short film" required>
+
+                <label for="thumbnail_concept">Thumbnail Concept</label>
+                <input type="text" id="thumbnail_concept" name="thumbnail_concept"
+                       placeholder="e.g., boy crying in rain, cinematic close-up">
             </fieldset>
 
+            <!-- Video Mode -->
             <fieldset>
-                <legend>🎬 Video Production Style</legend>
-                <div>
-                    <label for="video_style">Visual Style Guide</label>
-                    <input type="text" id="video_style" name="video_style" placeholder="e.g., Cinematic, realistic, 4K, documentary style">
-                </div>
-                <div style="margin-top: 1rem;">
-                    <label for="voice_selection">Voiceover Selection</label>
-                    <select id="voice_selection" name="voice_selection">
-                        <option value="Rachel">Rachel (Calm, American)</option>
-                        <option value="Adam">Adam (Deep, British)</option>
-                        <option value="Antoni">Antoni (Well-rounded, American)</option>
-                        <option value="Bella">Bella (Youthful, American)</option>
-                        <option value="Domi">Domi (Assertive, Polish)</option>
-                        <option value="Arnold">Arnold (Narrative, American)</option>
-                    </select>
-                </div>
+                <legend>🎞 Select Video Type</legend>
+
+                <label for="video_type">Video Duration / Type</label>
+                <select id="video_type" name="video_type" required>
+                    <option value="reel">Reel (30–60 sec)</option>
+                    <option value="film">Short Film (1–5 minutes)</option>
+                </select>
+
+                <label for="language">Language</label>
+                <select id="language" name="language">
+                    <option value="english">English</option>
+                    <option value="urdu">Roman Urdu</option>
+                </select>
             </fieldset>
 
+            <!-- Character System -->
             <fieldset>
-                <legend>Optional Enhancements</legend>
-                <div>
-                    <label for="author_name">Author/Brand Name (for branding)</label>
-                    <input type="text" id="author_name" name="author_name" placeholder="e.g., Naseem Aslam">
-                </div>
+                <legend>👤 Character System (Optional)</legend>
+
+                <label for="num_characters">Number of Characters</label>
+                <select id="num_characters" name="num_characters">
+                    <option value="0">No characters</option>
+                    <option value="1">1 Character</option>
+                    <option value="2">2 Characters</option>
+                    <option value="3">3 Characters</option>
+                </select>
+
+                <label>Character Details</label>
+                <textarea name="characters" rows="4"
+                    placeholder="Example:
+Ali: 22 years old, honest, hardworking
+Sara: 20 years old, emotional, shy">
+                </textarea>
+
+                <label>Upload Character Reference Images (optional)</label>
+                <input type="file" name="character_images" multiple>
+            </fieldset>
+
+            <!-- Scraping Mode -->
+            <fieldset>
+                <legend>🔎 Data Sources (Optional)</legend>
+
+                <label for="scraping_mode">Use YouTube Scraping?</label>
+                <select id="scraping_mode" name="scraping_mode">
+                    <option value="none">No Scraping (AI Only)</option>
+                    <option value="scrapingbee">ScrapingBee</option>
+                    <option value="serpapi">SerpAPI</option>
+                </select>
+            </fieldset>
+
+            <!-- Voiceover -->
+            <fieldset>
+                <legend>🎤 Voiceover Settings</legend>
+
+                <label for="voice_selection">Voice Selection</label>
+                <select id="voice_selection" name="voice_selection">
+                    <option value="Rachel">Rachel</option>
+                    <option value="Adam">Adam</option>
+                    <option value="Antoni">Antoni</option>
+                    <option value="Bella">Bella</option>
+                    <option value="Arnold">Arnold</option>
+                </select>
             </fieldset>
 
             <button type="submit">✨ Generate Video</button>
+
         </form>
     </div>
 </body>
