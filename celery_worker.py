@@ -253,10 +253,28 @@ def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
     # Simple fallback voice map
     fallback_voices = { "male": "pNInz6obpgDQGcFmaJgB", "female": "EXAVITQu4vr4xnSDxMaL" }
 
+   # ... inside refine_script_with_roles ...
+
     for seg in segments:
-        speaker_name = seg.get("speaker")
-        text = seg.get("text")
-        
+        # [FIX START] robustness check
+        if isinstance(seg, str):
+            # If AI returned strings like "Narrator: text", parse manually
+            parts = seg.split(":", 1)
+            if len(parts) == 2:
+                speaker_name = parts[0].strip()
+                text = parts[1].strip()
+            else:
+                speaker_name = "Narrator"
+                text = seg.strip()
+        elif isinstance(seg, dict):
+            # Normal JSON object case
+            speaker_name = seg.get("speaker", "Narrator")
+            text = seg.get("text", "")
+        else:
+            continue
+        # [FIX END]
+
+        # Try to find matching character in storyboard
         char_obj = next((c for c in storyboard.get("characters", []) if c.get("name") == speaker_name), None)
         
         if speaker_name == "Narrator":
