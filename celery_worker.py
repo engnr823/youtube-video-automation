@@ -230,6 +230,7 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
 def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
     """
     Splits the script into segments: [{'text': '...', 'voice_id': '...'}]
+    Robustly handles both JSON list and String list outputs from OpenAI.
     """
     prompt = f"""
     You are a Voice Director. 
@@ -247,34 +248,40 @@ def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
     raw = get_openai_response(prompt, temperature=0.3, is_json=True)
     segments = extract_json_from_text(raw) or []
     
+    logging.info(f"Script Doctor Raw Output Type: {type(segments)}")
+    
     final_segments = []
     main_voice_id = form_data.get("voice_selection") or "21m00Tcm4TlvDq8ikWAM"
     
-    # Simple fallback voice map
+    # Fallback voices
     fallback_voices = { "male": "pNInz6obpgDQGcFmaJgB", "female": "EXAVITQu4vr4xnSDxMaL" }
 
-   # ... inside refine_script_with_roles ...
-
     for seg in segments:
-        # [FIX START] robustness check
-        if isinstance(seg, str):
-            # If AI returned strings like "Narrator: text", parse manually
-            parts = seg.split(":", 1)
-            if len(parts) == 2:
+        speaker_name = "Narrator"
+        text = ""
+
+        # --- [ROBUST PARSING LOGIC] ---
+        if isinstance(seg, dict):
+            # Perfect case: AI returned a dictionary
+            speaker_name = seg.get("speaker", "Narrator")
+            text = seg.get("text", "")
+        elif isinstance(seg, str):
+            # Bad case: AI returned a string like "Ali: Hello world"
+            if ":" in seg:
+                parts = seg.split(":", 1)
                 speaker_name = parts[0].strip()
                 text = parts[1].strip()
             else:
                 speaker_name = "Narrator"
                 text = seg.strip()
-        elif isinstance(seg, dict):
-            # Normal JSON object case
-            speaker_name = seg.get("speaker", "Narrator")
-            text = seg.get("text", "")
         else:
+            # Unknown type, skip
             continue
-        # [FIX END]
+        # ------------------------------
 
-        # Try to find matching character in storyboard
+        if not text: continue
+
+        # Find matching character voice
         char_obj = next((c for c in storyboard.get("characters", []) if c.get("name") == speaker_name), None)
         
         if speaker_name == "Narrator":
@@ -289,7 +296,6 @@ def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
         final_segments.append({"text": text, "voice_id": voice})
         
     return final_segments
-
 # -------------------------
 # Character & Image Generation
 # -------------------------
