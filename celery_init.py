@@ -1,30 +1,54 @@
-# celery_init.py
-
 import os
 from celery import Celery
 
-CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL')
-CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND')
+def make_celery():
+    # 1. Smart URL Handling
+    # Checks CELERY_BROKER_URL first, then REDIS_URL (Railway default), then localhost fallback
+    redis_url = os.getenv('CELERY_BROKER_URL') or os.getenv('REDIS_URL') or 'redis://localhost:6379/0'
 
-if not CELERY_BROKER_URL or not CELERY_RESULT_BACKEND:
-    raise ValueError("CELERY_BROKER_URL and CELERY_RESULT_BACKEND environment variables must be set.")
+    app = Celery(
+        'video_automation_tasks',
+        broker=redis_url,
+        backend=redis_url,
+        include=['celery_worker'] # Ensures the worker tasks are registered
+    )
 
-celery = Celery(
-    'tasks',
-    broker=CELERY_BROKER_URL,
-    backend=CELERY_RESULT_BACKEND,
-    broker_connection_retry_on_startup=True,
-    include=['celery_worker']
-)
+    # 2. CRITICAL CONFIGURATION
+    app.conf.update(
+        # Fix for "Exception information must include..." error:
+        # We force everything to be JSON. This prevents Python objects from crashing Redis.
+        task_serializer='json',
+        accept_content=['json'],  
+        result_serializer='json',
+        
+        # Timezones
+        timezone='UTC',
+        enable_utc=True,
 
-celery.conf.update(
-    broker_transport_options={
-        'visibility_timeout': 7200, # Increased for longer video tasks
-        'retry_on_timeout': True,
-        'max_retries': 3,
-        'interval_start': 0,
-        'interval_step': 0.2,
-        'interval_max': 0.5,
-    },
-    broker_pool_limit=None
-)
+        # Connection Settings
+        broker_connection_retry_on_startup=True,
+        broker_pool_limit=10, # Limit connections to prevent Redis crashes
+
+        # Video Processing Optimizations
+        # Prefetch=1 means: "Don't grab a new video task until the current one is 100% done"
+        # This prevents the worker from choking on RAM.
+        worker_prefetch_multiplier=1, 
+        
+        # Result Settings
+        result_expires=86400, # Keep results for 24 hours
+        task_track_started=True, # Helps the UI show "Processing"
+        result_extended=True,
+
+        # Timeouts (Video generation is slow!)
+        broker_transport_options={
+            'visibility_timeout': 7200, # 2 Hours (Plenty of time for long renders)
+            'max_retries': 3,
+            'interval_start': 0,
+            'interval_step': 0.2,
+            'interval_max': 0.5,
+        }
+    )
+
+    return app
+
+celery = make_celery()
