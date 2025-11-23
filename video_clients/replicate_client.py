@@ -3,36 +3,35 @@ import logging
 import replicate
 
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
-# Using Wan 2.1 Image-to-Video (This is much cheaper than Luma/Runway but great quality)
+# Using Wan 2.1 (Good choice for cost/performance)
 MODEL_ID = "wan-video/wan-2.1-1.3b"
 
-def generate_video_scene_with_replicate(prompt: str, image_url: str = None) -> str:
+def generate_video_scene_with_replicate(prompt: str, image_url: str = None, aspect: str = "16:9") -> str:
     """
-    Generates a video from a source image (Image-to-Video).
+    Generates a video from a source image.
+    [CRITICAL UPDATE] Now accepts 'aspect' to prevent Worker crashes.
     """
     if not REPLICATE_API_TOKEN:
         raise ConnectionError("Replicate token missing.")
 
-    logging.info(f"🎬 Animating Scene: '{prompt}' from Image...")
+    logging.info(f"🎬 Animating Scene: '{prompt[:30]}...' | Aspect: {aspect}")
 
     try:
         input_payload = {
-            "prompt": prompt,  # e.g., "Camera pans right, character waves"
-            "negative_prompt": "distortion, morphing, static, low quality",
-            "aspect_ratio": "16:9",
+            "prompt": prompt, 
+            "negative_prompt": "distortion, morphing, static, low quality, watermark, text",
+            "aspect_ratio": aspect, # Now uses the dynamic variable (16:9 or 9:16)
             "quality": "high"
         }
         
-        # IF we provided an image (which we should for consistency), add it
+        # Wan 2.1 specific: ensure image is passed if available
         if image_url:
             input_payload["image"] = image_url
-            # Wan 2.1 specific parameter for image influence
-            # Some models call it 'start_image' or 'image'. Check Replicate docs for specific model version.
         
         output = replicate.run(MODEL_ID, input=input_payload)
 
-        # Handle output (Wan usually returns a list)
-        video_url = output[0] if isinstance(output, list) else output
+        # Handle output (Replicate usually returns a list for video models)
+        video_url = output[0] if isinstance(output, list) else str(output)
         return video_url
 
     except Exception as e:
