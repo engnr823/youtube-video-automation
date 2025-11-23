@@ -1,8 +1,12 @@
+# video_clients/elevenlabs_client.py
+
 import os
 import logging
 import uuid
+import tempfile
 import cloudinary
 import cloudinary.uploader
+from pathlib import Path
 from elevenlabs.client import ElevenLabs
 
 # --- Client Initialization ---
@@ -13,64 +17,65 @@ if not ELEVENLABS_API_KEY:
 else:
     client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
-
 def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
     """
-    Generates audio using the ElevenLabs API, saves it to a temporary file,
-    uploads it to Cloudinary, and then cleans up the local file.
-
-    Args:
-        script (str): The text script to be converted to speech.
-        voice_id (str): The ID of the ElevenLabs voice to use (e.g., "Rachel").
-
-    Returns:
-        str: The secure URL of the uploaded audio file on Cloudinary.
+    Generates audio using the ElevenLabs API, saves it to a cross-platform temp file,
+    uploads it to Cloudinary, and cleans up.
     """
     if not client:
-        raise ConnectionError("ElevenLabs client is not initialized. Please set the ELEVENLABS_API_KEY.")
+        raise ConnectionError("ElevenLabs client is not initialized.")
 
     if not script:
         logging.warning("Script is empty. Returning empty string.")
         return ""
 
-    logging.info(f"Generating voiceover with voice: {voice_id}...")
+    logging.info(f"🎙️ Generating voiceover for: {voice_id}...")
 
-    # Define filename early to ensure it exists for the finally block
-    temp_filename = f"/tmp/voiceover_{uuid.uuid4()}.mp3"
+    # [IMPROVEMENT] Use cross-platform temp directory instead of hardcoded "/tmp/"
+    temp_dir = tempfile.gettempdir()
+    temp_filename = os.path.join(temp_dir, f"voiceover_{uuid.uuid4()}.mp3")
 
     try:
         # 1. Generate audio stream from ElevenLabs
-        # Using the modern 'text_to_speech.convert' method which returns a generator
+        # [CONFIRMATION] 'convert' returns a generator of bytes. This is the correct V1+ usage.
         audio_generator = client.text_to_speech.convert(
             text=script,
             voice_id=voice_id,
-            model_id="eleven_multilingual_v2"
+            model_id="eleven_multilingual_v2", # Valid Flagship Model (Not Deprecated)
+            output_format="mp3_44100_128"      # [ADDED] Explicitly request high-quality MP3
         )
 
-        # 2. Consume the generator and write bytes to the temporary file
+        # 2. Write stream to file
         with open(temp_filename, 'wb') as f:
             for chunk in audio_generator:
-                f.write(chunk)
+                if chunk:
+                    f.write(chunk)
 
-        # 3. Upload the temporary file to Cloudinary
-        logging.info(f"Uploading voiceover '{temp_filename}' to Cloudinary...")
+        # 3. Upload to Cloudinary
+        # [CONFIRMATION] resource_type="video" is CORRECT. Cloudinary treats audio as video.
+        logging.info(f"☁️ Uploading to Cloudinary...")
         upload_result = cloudinary.uploader.upload(
             temp_filename,
-            resource_type="video"  # Cloudinary treats audio as a 'video' resource type
+            resource_type="video", 
+            folder="voiceovers" # [ADDED] Keep your bucket organized
         )
 
         secure_url = upload_result.get('secure_url')
         if not secure_url:
-            raise Exception("Cloudinary upload failed, no secure_url returned.")
+            raise RuntimeError("Cloudinary upload failed: No secure_url returned")
 
-        logging.info(f"✅ Voiceover uploaded successfully: {secure_url}")
+        logging.info(f"✅ Voiceover Ready: {secure_url}")
         return secure_url
 
     except Exception as e:
-        logging.error(f"🔴 An error occurred during voiceover generation or upload: {e}")
-        raise
+        logging.error(f"🔴 Voiceover Generation Failed: {e}")
+        raise  # Re-raise to trigger Celery retry logic
+
     finally:
-        # 4. Clean up the temporary file
-        if os.path.exists(temp_filename):
-            os.remove(temp_filename)
-            logging.info(f"Cleaned up temporary file: {temp_filename}")
+        # 4. Safe Cleanup
+        try:
+            if os.path.exists(temp_filename):
+                os.remove(temp_filename)
+                logging.debug(f"🧹 Cleaned up: {temp_filename}")
+        except Exception as cleanup_error:
+            logging.warning(f"⚠️ Failed to delete temp file: {cleanup_error}")
