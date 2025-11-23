@@ -446,8 +446,15 @@ def srt_from_narration(segments: List[dict], out_path: str):
             start = end
 
 def burn_subtitles(input_video: str, srt_path: str, output_video: str):
-    style = "Fontsize=24,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,BorderStyle=3"
+    # [FIXED STYLE]
+    # BorderStyle=1 (Outline only, NO box)
+    # Fontsize=16 (Smaller, cinematic)
+    # MarginV=30 (Pushed to bottom)
+    style = "FontName=Arial,Fontsize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,MarginV=30,Alignment=2"
+    
+    # Escape the path for FFmpeg
     escaped_srt = srt_path.replace("\\", "/").replace(":", "\\:")
+    
     cmd = ["ffmpeg", "-y", "-i", input_video, "-vf", f"subtitles='{escaped_srt}':force_style='{style}'", "-c:a", "copy", output_video]
     run_subprocess(cmd)
     return output_video
