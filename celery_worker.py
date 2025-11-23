@@ -205,12 +205,14 @@ def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: 
 def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict) -> dict:
     prompt_template = load_prompt_template("prompt_video_storyboard_creator.txt")
     if not prompt_template:
+        # Fallback prompt if file is missing
         prompt_template = """
         You are an expert short film writer.
-        BLUEPRINT: $blueprint_json
         TASK: Create an original short film script for '$keyword'.
+        CONSTRAINTS: 
+        - Create exactly $max_scenes scenes.
+        - Each scene must be 3-5 seconds long.
         INPUT CONTEXT: $uploaded_assets_context
-        
         Output valid JSON with keys: video_title, video_description, main_character_profile, characters (list), scenes (list).
         """
     
@@ -219,13 +221,20 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
     if form_data.get("characters"):
         full_context += f"\n\nUSER DEFINED CHARACTERS:\n{form_data.get('characters')}"
 
+    # [FIX] Extract max_scenes from form, default to 7 if missing
+    target_scenes = form_data.get("max_scenes", 7)
+
     prompt = template.safe_substitute(
         keyword=full_context,
         blueprint_json=json.dumps(blueprint),
         language=form_data.get("language", "english"),
         video_type=form_data.get("video_type", "reel"),
-        uploaded_assets_context="User uploaded images present" if form_data.get("uploaded_images") else "No uploads"
+        uploaded_assets_context="User uploaded images present" if form_data.get("uploaded_images") else "No uploads",
+        max_scenes=str(target_scenes) # [CRITICAL FIX] Pass this to the prompt
     )
+
+    # We append a strict instruction to the end of the prompt to override any defaults
+    prompt += f"\n\nIMPORTANT: You MUST generate exactly {target_scenes} scenes. No more, no less."
 
     raw = get_openai_response(prompt, temperature=0.6, is_json=True)
     obj = extract_json_from_text(raw) or json.loads(raw)
@@ -430,31 +439,44 @@ def merge_audio_video_with_music(video_path: str, voice_path: str, music_url: st
     return output_path
 
 def srt_from_narration(segments: List[dict], out_path: str):
+    """
+    Generates an SRT file. 
+    [FIX] Caps duration at 5 seconds max per line to prevent 'stuck' text.
+    """
     start = 0.0
     with open(out_path, "w", encoding="utf-8") as f:
         for i, seg in enumerate(segments):
-            text = seg.get("text","")
-            dur = max(1.5, len(text) / 15) 
+            text = seg.get("text","").strip()
+            if not text: continue
+            
+            # Calculate duration based on reading speed
+            # Fast reading: 20 chars per second
+            dur = len(text) / 20 
+            # Clamp duration: Min 1s, Max 5s (prevents text staying too long)
+            dur = max(1.0, min(dur, 5.0))
+            
             end = start + dur
+            
             def fmt(t):
                 h = int(t // 3600)
                 m = int((t % 3600) // 60)
                 s = int(t % 60)
                 ms = int((t - int(t)) * 1000)
                 return f"{h:02}:{m:02}:{s:02},{ms:03}"
+            
             f.write(f"{i+1}\n{fmt(start)} --> {fmt(end)}\n{text}\n\n")
             start = end
 
 def burn_subtitles(input_video: str, srt_path: str, output_video: str):
     # [FIXED STYLE]
-    # BorderStyle=1 (Outline only, NO box)
-    # Fontsize=16 (Smaller, cinematic)
-    # MarginV=30 (Pushed to bottom)
-    style = "FontName=Arial,Fontsize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,MarginV=30,Alignment=2"
+    # Alignment=2 (Bottom Center)
+    # MarginV=50 (Push up slightly from very bottom edge)
+    # Fontsize=14 (Smaller, cleaner)
+    # BackColour=&H80000000 (Semi-transparent black background for readability)
+    # BorderStyle=3 (Box) - RE-ADDING BOX but making it transparent/cleaner
+    style = "Fontname=Arial,Fontsize=14,PrimaryColour=&H00FFFFFF,BackColour=&H60000000,BorderStyle=3,Outline=0,Shadow=0,MarginV=50,Alignment=2"
     
-    # Escape the path for FFmpeg
     escaped_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-    
     cmd = ["ffmpeg", "-y", "-i", input_video, "-vf", f"subtitles='{escaped_srt}':force_style='{style}'", "-c:a", "copy", output_video]
     run_subprocess(cmd)
     return output_video
