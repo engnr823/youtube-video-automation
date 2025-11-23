@@ -205,14 +205,16 @@ def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: 
 def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict) -> dict:
     prompt_template = load_prompt_template("prompt_video_storyboard_creator.txt")
     if not prompt_template:
-        # Fallback prompt if file is missing
         prompt_template = """
         You are an expert short film writer.
         TASK: Create an original short film script for '$keyword'.
-        CONSTRAINTS: 
-        - Create exactly $max_scenes scenes.
-        - Each scene must be 3-5 seconds long.
         INPUT CONTEXT: $uploaded_assets_context
+        
+        CRITICAL CONSTRAINTS:
+        1. The script MUST be at least 150 words long (for a 60-second video).
+        2. Generate exactly $max_scenes scenes.
+        3. Write detailed dialogue.
+        
         Output valid JSON with keys: video_title, video_description, main_character_profile, characters (list), scenes (list).
         """
     
@@ -221,7 +223,6 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
     if form_data.get("characters"):
         full_context += f"\n\nUSER DEFINED CHARACTERS:\n{form_data.get('characters')}"
 
-    # [FIX] Extract max_scenes from form, default to 7 if missing
     target_scenes = form_data.get("max_scenes", 7)
 
     prompt = template.safe_substitute(
@@ -230,11 +231,11 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
         language=form_data.get("language", "english"),
         video_type=form_data.get("video_type", "reel"),
         uploaded_assets_context="User uploaded images present" if form_data.get("uploaded_images") else "No uploads",
-        max_scenes=str(target_scenes) # [CRITICAL FIX] Pass this to the prompt
+        max_scenes=str(target_scenes)
     )
 
-    # We append a strict instruction to the end of the prompt to override any defaults
-    prompt += f"\n\nIMPORTANT: You MUST generate exactly {target_scenes} scenes. No more, no less."
+    # [FIX] Enforce word count to ensure audio is long enough
+    prompt += f"\n\nIMPORTANT: The 'audio_narration' across all scenes MUST total at least 150 words. Do not write short scripts. Generate exactly {target_scenes} scenes."
 
     raw = get_openai_response(prompt, temperature=0.6, is_json=True)
     obj = extract_json_from_text(raw) or json.loads(raw)
@@ -244,7 +245,6 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
         return StoryboardSchema(**obj).dict()
     except ValidationError:
         return {"video_title": "Untitled", "scenes": obj.get("scenes", []), "characters": obj.get("characters", [])}
-
 # -------------------------
 # Multi-Voice Logic
 # -------------------------
@@ -468,16 +468,28 @@ def srt_from_narration(segments: List[dict], out_path: str):
             start = end
 
 def burn_subtitles(input_video: str, srt_path: str, output_video: str):
-    # [FIXED STYLE]
-    # Alignment=2 (Bottom Center)
-    # MarginV=50 (Push up slightly from very bottom edge)
-    # Fontsize=14 (Smaller, cleaner)
-    # BackColour=&H80000000 (Semi-transparent black background for readability)
-    # BorderStyle=3 (Box) - RE-ADDING BOX but making it transparent/cleaner
-    style = "Fontname=Arial,Fontsize=14,PrimaryColour=&H00FFFFFF,BackColour=&H60000000,BorderStyle=3,Outline=0,Shadow=0,MarginV=50,Alignment=2"
+    # [FIXED STYLE - CINEMATIC LOOK]
+    # BorderStyle=1 : Text with Outline (NO BOX) -> Solves the "Black Screen" issue
+    # Outline=2     : Thick black border so white text is readable on bright backgrounds
+    # Fontsize=12   : Small, professional size (standard for mobile reels)
+    # MarginV=35    : Pushed cleanly to the bottom (safe zone for TikTok captions)
+    style = "Fontsize=12,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=35,Alignment=2"
     
+    # Path escaping for Linux/FFmpeg
     escaped_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-    cmd = ["ffmpeg", "-y", "-i", input_video, "-vf", f"subtitles='{escaped_srt}':force_style='{style}'", "-c:a", "copy", output_video]
+    
+    # [CRITICAL UPDATE]
+    # We added '-pix_fmt yuv420p' to ensure the video plays on all devices.
+    cmd = [
+        "ffmpeg", "-y", 
+        "-i", input_video, 
+        "-vf", f"subtitles='{escaped_srt}':force_style='{style}'", 
+        "-c:v", "libx264", 
+        "-pix_fmt", "yuv420p", 
+        "-c:a", "copy", 
+        output_video
+    ]
+    
     run_subprocess(cmd)
     return output_video
 
