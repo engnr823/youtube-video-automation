@@ -1,4 +1,4 @@
-# app.py
+# app.py (UPDATED FOR VIDEO SUITE 2025)
 
 import os
 import logging
@@ -6,22 +6,36 @@ import json
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, Response
 from dotenv import load_dotenv
+import cloudinary
+import cloudinary.uploader
 
+# Load environment
 load_dotenv()
 
-# --- Celery app and task imports ---
+# Celery
 from celery_init import celery
-# Import the NEW video task
 from celery_worker import background_generate_video
 
-# If you still want to run the old text generator, you can import it too
-# from celery_worker import background_generate
-
-# --- Setup ---
+# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s]: %(message)s")
+
+# Flask
 app = Flask(__name__, template_folder="templates")
 
-# --- Multi-User Security (No changes needed here) ---
+# Cloudinary config for uploads
+if all([
+    os.getenv("CLOUDINARY_CLOUD_NAME"),
+    os.getenv("CLOUDINARY_API_KEY"),
+    os.getenv("CLOUDINARY_API_SECRET")
+]):
+    cloudinary.config(
+        cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+        api_key=os.getenv("CLOUDINARY_API_KEY"),
+        api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+        secure=True
+    )
+
+# ------------------ SECURITY ------------------
 def check_auth(username, password):
     users_json_str = os.environ.get("APP_USERS_JSON")
     if not users_json_str:
@@ -29,60 +43,89 @@ def check_auth(username, password):
     try:
         valid_users = json.loads(users_json_str)
     except json.JSONDecodeError:
-        logging.error("CRITICAL: APP_USERS_JSON variable is not valid JSON.")
+        logging.error("Invalid APP_USERS_JSON")
         return False
-    if username in valid_users and valid_users.get(username) == password:
-        return True
-    return False
+    return username in valid_users and valid_users.get(username) == password
 
 def authenticate():
     return Response(
-        'Could not verify your access level for that URL.\n'
-        'You have to login with proper credentials', 401,
+        'Authentication required.', 401,
         {'WWW-Authenticate': 'Basic realm="Login Required"'}
     )
 
 def requires_auth(f):
     @wraps(f)
-    def decorated(*args, **kwargs):
-        if not os.environ.get("APP_USERS_JSON"):
+    def wrapper(*args, **kwargs):
+        auth_enabled = os.environ.get("APP_USERS_JSON")
+        if not auth_enabled:
             return f(*args, **kwargs)
         auth = request.authorization
         if not auth or not check_auth(auth.username, auth.password):
             return authenticate()
         return f(*args, **kwargs)
-    return decorated
+    return wrapper
 
-# --- FLASK ROUTES ---
+
+# ------------------ ROUTES ------------------
 
 @app.route("/health")
 def health_check():
     return jsonify({"status": "ok"}), 200
+
 
 @app.route("/")
 @requires_auth
 def index():
     return render_template("index.html")
 
+
 @app.route("/generate", methods=["POST"])
 @requires_auth
 def generate():
+    """Handles new input form including file uploads, character system, scraping mode, etc."""
+    
+    # Convert text fields
     form_data = request.form.to_dict()
+
+    # Mandatory field
     if not form_data.get("keyword"):
-        return jsonify({"status": "error", "message": "Keyword is a required field."}), 400
-    
-    # --- MODIFIED: Call the new video generation task ---
+        return jsonify({"status": "error", "message": "Keyword is required"}), 400
+
+    # ---------------------------
+    # HANDLE CHARACTER IMAGES
+    # ---------------------------
+    uploaded_character_urls = []
+
+    if "character_images" in request.files:
+        files = request.files.getlist("character_images")
+
+        for f in files:
+            if f and f.filename.strip() != "":
+                try:
+                    upload = cloudinary.uploader.upload(
+                        f,
+                        folder="character_references",
+                        resource_type="image"
+                    )
+                    uploaded_character_urls.append(upload["secure_url"])
+                except Exception as e:
+                    logging.error(f"Image Upload Failed: {e}")
+
+    # Add to form_data for Celery
+    form_data["character_image_urls"] = uploaded_character_urls
+
+    # ---------------------------
+    # SEND TO CELERY WORKER
+    # ---------------------------
     task = background_generate_video.delay(form_data)
-    
-    # The result page will now be used to display video generation progress
+
     return render_template("result.html", task_id=task.id)
 
 
 @app.route("/check_result/<task_id>")
 def check_result(task_id):
     result = celery.AsyncResult(task_id)
-    
-    # This response structure is now tailored for the video payload
+
     response = {
         "status": result.state.lower(),
         "message": "",
@@ -92,39 +135,38 @@ def check_result(task_id):
         "storyboard": None
     }
 
+    # Pending
     if result.state == 'PENDING':
-        response["message"] = "Task is waiting to be processed."
+        response["message"] = "Task is queued."
+
+    # Progress
     elif result.state == 'PROGRESS':
-        progress_info = result.info if isinstance(result.info, dict) else {}
-        response.update(progress_info)
+        info = result.info if isinstance(result.info, dict) else {}
+        response.update(info)
         if not response.get("message"):
-            response["message"] = "Processing in progress..."
+            response["message"] = "Processing..."
+
+    # Success
     elif result.state == 'SUCCESS':
-        final_result = result.result
-        if isinstance(final_result, dict):
-            response.update(final_result)
-        response['status'] = 'ready' # Let the frontend know it's complete
+        final = result.result
+        if isinstance(final, dict):
+            response.update(final)
+        response['status'] = "ready"
+
+    # Failure
     elif result.state == 'FAILURE':
         response["status"] = "error"
-        try:
-            error_info = str(result.info)
-            response["message"] = f"Task failed. Please check worker logs. Error: {error_info}"
-        except Exception:
-            response["message"] = "Task failed with an unknown error."
-        
+        response["message"] = str(result.info)
+
     return jsonify(response)
 
 
-# You may want a new route to display the final video, or handle it on the result page
 @app.route("/video/<task_id>")
 def video_player(task_id):
     result = celery.AsyncResult(task_id)
-    if result.state != 'SUCCESS' or not result.result:
-        return "<h1>Video Not Found or Not Ready</h1><p>This video may still be processing or failed.</p>", 404
-        
-    data = result.result
-    # A new, simple template to just show the video
-    return render_template("video_template.html", data=data)
+    if result.state != 'SUCCESS':
+        return "Video not ready or failed.", 404
+    return render_template("video_template.html", data=result.result)
 
 
 if __name__ == "__main__":
