@@ -34,6 +34,7 @@ def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
     temp_filename = os.path.join(temp_dir, f"voiceover_{uuid.uuid4()}.mp3")
 
     try:
+        # Generate audio stream
         audio_generator = client.text_to_speech.convert(
             text=script,
             voice_id=voice_id,
@@ -41,6 +42,7 @@ def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
             output_format="mp3_44100_128"
         )
 
+        # Write stream to file
         with open(temp_filename, 'wb') as f:
             for chunk in audio_generator:
                 f.write(chunk)
@@ -61,6 +63,10 @@ def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
             os.remove(temp_filename)
 
 def generate_multi_voice_audio(segments: List[Dict[str, str]]) -> str:
+    """
+    Generates multiple audio clips and stitches them into one file.
+    Compatible with the SaaS 'refine_script_with_roles' worker function.
+    """
     if not client: raise ConnectionError("ElevenLabs client is not initialized.")
     if not segments: return ""
 
@@ -111,20 +117,24 @@ def generate_multi_voice_audio(segments: List[Dict[str, str]]) -> str:
         if not audio_files: 
             raise RuntimeError("No audio segments generated. Check API Key and Voice IDs.")
 
-        # Stitching (Same as before)
+        # --- STITCHING LOGIC (Requires FFmpeg) ---
         concat_list_path = os.path.join(temp_dir, f"concat_list_{unique_run_id}.txt")
         final_output_path = os.path.join(temp_dir, f"final_dialogue_{unique_run_id}.mp3")
         
+        # Create FFmpeg concat list
         with open(concat_list_path, "w") as f:
             for path in audio_files:
+                # Escape single quotes for FFmpeg list file
                 safe_path = path.replace("'", "'\\''") 
                 f.write(f"file '{safe_path}'\n")
 
+        # Run FFmpeg to merge MP3s
         subprocess.run(
             ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path, "-c", "copy", final_output_path],
             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
 
+        # Upload final merged audio
         upload_result = cloudinary.uploader.upload(final_output_path, resource_type="video", folder="voiceovers")
         return upload_result.get('secure_url')
 
@@ -132,7 +142,7 @@ def generate_multi_voice_audio(segments: List[Dict[str, str]]) -> str:
         logging.error(f"Multi-voice process failed: {e}")
         raise
     finally:
-        # Cleanup logic (Same as before)
+        # Cleanup temp files
         for f in audio_files: 
             if os.path.exists(f): os.remove(f)
         if 'concat_list_path' in locals() and os.path.exists(concat_list_path): os.remove(concat_list_path)
