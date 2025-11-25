@@ -165,11 +165,12 @@
             document.getElementById("statusText").innerText = "Submitting Task...";
 
             const formData = new FormData(form);
-            const keyword = document.getElementById("keyword").value;
             const details = document.getElementById("character_details").value;
             
-            // Inject Character Context
-            if (details.trim()) formData.set("keyword", `${keyword}. CHARACTER CONTEXT: ${details}`);
+            // [FIXED] Send character details as a separate field, NOT merged with keyword
+            if (details.trim()) {
+                formData.append("characters", details);
+            }
 
             try {
                 const res = await fetch("/generate", { method: "POST", body: formData });
@@ -211,8 +212,8 @@
             const vid = document.getElementById("finalVideo");
             vid.src = data.video_url;
             if(data.thumbnail_url) {
-                vid.poster = data.thumbnail_url; // Shows thumbnail on video player
-                document.getElementById("thumbnailPreview").src = data.thumbnail_url; // Shows small preview
+                vid.poster = data.thumbnail_url; 
+                document.getElementById("thumbnailPreview").src = data.thumbnail_url; 
             }
 
             // 2. Setup Metadata
