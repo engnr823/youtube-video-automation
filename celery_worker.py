@@ -238,15 +238,27 @@ def generate_flux_image_safe(prompt: str, aspect: str = "9:16") -> str:
     )
     return str(output[0]) if isinstance(output, (list, tuple)) else str(output)
 
+# Specific retry for Replicate Lip Sync
 @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_fixed(10), retry=retry_if_exception_type(ReplicateError))
 def generate_lip_sync_safe(image_url: str, audio_url: str) -> str:
+    """Generates lip-sync video using sadtalker on Replicate."""
     logging.info(f"👄 Starting Lip Sync generation (SadTalker)...")
+    
+    # --- UPDATED MODEL VERSION BELOW ---
     output = replicate.run(
-        "cjwbw/sadtalker:a519a502c74ac74325776184f17a54342880017f848988a641dd1e88e8945d81",
-        input={"source_image": image_url, "driven_audio": audio_url, "still": True, "enhancer": "gfpgan"}
+        "cjwbw/sadtalker:3aa3dac937e5675cb5761e31c50853e66172d54467d16781206152b12267191d",
+        input={
+            "source_image": image_url, 
+            "driven_audio": audio_url, 
+            "still": True, 
+            "enhancer": "gfpgan",
+            "preprocess": "full",
+            "expression_scale": 1.0,
+            "ref_eyeblink": None,
+            "ref_pose": None
+        }
     )
     return str(output)
-
 def process_single_scene(scene: dict, index: int, character_profile: str, aspect: str = "9:16", default_voice_id: str = None) -> (int, Optional[str]):
     try:
         logging.info(f"--- Processing Scene {index+1} ---")
