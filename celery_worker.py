@@ -48,7 +48,7 @@ except ImportError:
 #  🚨 BUDGET SAFETY SWITCH 🚨
 #  False = Images Only (Budget Mode). True = Real Video/LipSync (Costly).
 # ==========================================
-USE_REAL_EXPENSIVE_GENERATION = False
+USE_REAL_EXPENSIVE_GENERATION = True
 # ==========================================
 
 
