@@ -18,32 +18,43 @@ from pathlib import Path
 import requests
 import cloudinary
 import cloudinary.uploader
-from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type, wait_fixed
 from pydantic import BaseModel, ValidationError
 
 # Celery app import
-from celery_init import celery
+try:
+    from celery_init import celery
+except ImportError:
+    logging.critical("❌ Could not import 'celery' from 'celery_init'.")
+    sys.exit(1)
 
 # AI Clients
 from openai import OpenAI
 import replicate
+from replicate.exceptions import ReplicateError
 
 # --- CLIENT IMPORT SAFETY BLOCK ---
 try:
-    from video_clients.elevenlabs_client import generate_voiceover_and_upload, generate_multi_voice_audio
+    from video_clients.elevenlabs_client import generate_voiceover_and_upload
 except ImportError:
-    logging.warning("⚠️ ElevenLabs client not found. Voiceover generation will fail.")
+    logging.error("⚠️ ElevenLabs client not found. Audio/Lip-sync will fail.")
     generate_voiceover_and_upload = None
-    generate_multi_voice_audio = None
 
 try:
-    # [FIX] Imported Lip Sync function here for future use
-    from video_clients.replicate_client import generate_video_scene_with_replicate, generate_lip_sync_with_replicate
+    from video_clients.replicate_client import generate_video_scene_with_replicate
 except ImportError:
-    logging.warning("⚠️ Replicate client not found. Video generation will fail.")
+    logging.warning("⚠️ Standard video generation client not found (okay if using lip-sync only).")
     generate_video_scene_with_replicate = None
-    generate_lip_sync_with_replicate = None
 # ----------------------------------
+
+# ==========================================
+#  🚨 BUDGET SAFETY SWITCH 🚨
+#  FALSE = Generates images only (FREE/CHEAP). Good for testing logic.
+#  TRUE  = Generates Lip Sync Video (COSTS MONEY).
+# ==========================================
+USE_REAL_EXPENSIVE_GENERATION = False
+# ==========================================
+
 
 # -------------------------
 # Configuration
@@ -53,9 +64,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
-SCRAPINGBEE_API_KEY = os.getenv("SCRAPINGBEE_API_KEY")
-SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
+# Cloudinary Config
 if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.getenv("CLOUDINARY_API_SECRET")]):
     cloudinary.config(
         cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME"),
@@ -69,56 +79,9 @@ else:
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # -------------------------
-# Royalty-Free Music Library
-# -------------------------
-MUSIC_LIBRARY = {
-    "motivational": "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3",
-    "sad": "https://cdn.pixabay.com/download/audio/2021/11/24/audio_8243a76035.mp3",
-    "intense": "https://cdn.pixabay.com/download/audio/2022/03/24/audio_07b04b67e0.mp3",
-    "happy": "https://cdn.pixabay.com/download/audio/2022/01/18/audio_d0a13f69d2.mp3",
-    "default": "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3"
-}
-
-# -------------------------
-# Pydantic Schemas
-# -------------------------
-class SceneSchema(BaseModel):
-    scene_id: int
-    duration_seconds: float
-    visual_prompt: str
-    action_prompt: str
-    audio_narration: Optional[str] = ""
-    shot_type: Optional[str] = "medium"
-    camera_angle: Optional[str] = "35mm"
-    lighting: Optional[str] = "soft cinematic"
-    emotion: Optional[str] = "neutral"
-    characters_in_scene: Optional[List[str]] = []
-    image_url: Optional[str] = None
-    video_url: Optional[str] = None
-    sfx_note: Optional[str] = ""
-
-class StoryboardSchema(BaseModel):
-    video_title: str
-    video_description: Optional[str] = ""
-    main_character_profile: Optional[str] = ""
-    characters: Optional[List[dict]] = []
-    scenes: List[SceneSchema]
-
-# -------------------------
 # Utility Helpers
 # -------------------------
-def ensure_dir(path: str):
-    Path(path).mkdir(parents=True, exist_ok=True)
-
-def load_prompt_template(filename: str) -> str:
-    path = os.path.join("prompts", filename)
-    if not os.path.exists(path):
-        return ""
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-@retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3),
-       retry=retry_if_exception_type(requests.exceptions.RequestException))
+@retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
 def download_to_file(url: str, dest_path: str, timeout: int = 300):
     logging.info(f"Downloading {url} -> {dest_path}")
     with requests.get(url, stream=True, timeout=timeout) as r:
@@ -129,20 +92,21 @@ def download_to_file(url: str, dest_path: str, timeout: int = 300):
     return dest_path
 
 def run_subprocess(cmd: List[str], check=True) -> subprocess.CompletedProcess:
-    logging.debug("Running command: " + " ".join(cmd))
     try:
-        return subprocess.run(cmd, check=check, capture_output=True, text=True)
+        return subprocess.run(cmd, check=check, capture_output=True, text=True, close_fds=True)
     except subprocess.CalledProcessError as e:
-        logging.error("Subprocess failed: " + str(e.stderr or e))
+        logging.error(f"FFmpeg Error: {e.stderr}")
         raise
 
 def safe_upload_to_cloudinary(filepath: str, resource_type="video", folder="automations"):
+    if not os.getenv("CLOUDINARY_API_KEY"): return filepath
     try:
+        logging.info(f"Uploading to Cloudinary: {filepath}")
         res = cloudinary.uploader.upload(filepath, resource_type=resource_type, folder=folder)
         return res.get("secure_url")
     except Exception as e:
         logging.error(f"Cloudinary upload failed: {e}")
-        raise
+        return filepath 
 
 def extract_json_from_text(text: str) -> Optional[dict]:
     if not text: return None
@@ -157,474 +121,297 @@ def extract_json_from_text(text: str) -> Optional[dict]:
         except: pass
     return None
 
-def extract_json_list_from_text(text: str) -> Optional[list]:
-    """Helper to extract a JSON list [ ... ] from text."""
-    if not text: return None
-    m = re.search(r'```(?:json)?\s*(\[.*\])\s*```', text, re.DOTALL)
-    if m:
-        try: return json.loads(m.group(1))
-        except: pass
-    start = text.find("[")
-    end = text.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        try: return json.loads(text[start:end+1])
-        except: pass
-    return None
-
 # -------------------------
-# Scraping & Storyboard
+# 1. Storyboard Agent (Prompt Engineering)
 # -------------------------
-def scrape_youtube_videos(keyword: str, provider: str = "scrapingbee", max_results: int = 3) -> List[dict]:
-    results = []
-    logging.info(f"Scraping YouTube for '{keyword}' provider={provider}")
-    try:
-        if provider.lower() == "scrapingbee":
-            if not SCRAPINGBEE_API_KEY:
-                 # Non-blocking warning, allow flow to continue if key missing
-                 logging.warning("SCRAPINGBEE_API_KEY missing, skipping scrape.")
-                 return []
-            url = f"https://www.youtube.com/results?search_query={requests.utils.quote(keyword)}"
-            params = {"api_key": SCRAPINGBEE_API_KEY, "url": url, "render_js": "false"}
-            r = requests.get("https://app.scrapingbee.com/api/v1/", params=params, timeout=30)
-            if r.status_code == 200:
-                html = r.text
-                match = re.search(r"ytInitialData\s*=\s*(\{.*\});", html, re.DOTALL)
-                if match:
-                    # Simplified parsing to avoid huge complexity here
-                    pass 
-    except Exception as e:
-        logging.error(f"Scraping error: {e}")
-    return results
-
-def analyze_competitors(scraped_videos: List[dict]) -> Dict[str, Any]:
-    return {
-        "hook_style": "intrigue", 
-        "avg_scene_count": 6, 
-        "tone": "motivational" 
-    }
-
-def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: bool = False) -> str:
+@retry(wait=wait_exponential(multiplier=1, min=2, max=20), stop=stop_after_attempt(3))
+def get_openai_response(prompt_content: str, is_json: bool = False) -> str:
     if not openai_client: raise RuntimeError("OpenAI client not configured")
     try:
         completion = openai_client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL","gpt-4o"),
+            model=os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview"),
             messages=[{"role":"system","content":"You are a professional screenwriter."},{"role":"user","content":prompt_content}],
-            temperature=temperature,
             response_format={"type": "json_object"} if is_json else {"type": "text"}
         )
         return completion.choices[0].message.content or ""
     except Exception as e:
-        logging.error(f"OpenAI error: {e}")
-        return ""
+        logging.error(f"OpenAI API error: {e}")
+        raise
 
-def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict) -> dict:
-    prompt_template = load_prompt_template("prompt_video_storyboard_creator.txt")
-    if not prompt_template:
-        prompt_template = """
-        TASK: Create an original short film script for '$keyword'.
-        Output valid JSON with keys: video_title, video_description, main_character_profile, characters (list), scenes (list).
-        """
-    
-    template = Template(prompt_template)
-    
-    full_context = keyword
-    if form_data.get("characters"):
-        full_context += f"\n\nUSER DEFINED CHARACTERS:\n{form_data.get('characters')}"
-
-    target_scenes = form_data.get("max_scenes", 7)
-
-    prompt = template.safe_substitute(
-        keyword=full_context,
-        blueprint_json=json.dumps(blueprint),
-        language=form_data.get("language", "english"),
-        video_type=form_data.get("video_type", "reel"),
-        uploaded_assets_context="User uploaded images present" if form_data.get("uploaded_images") else "No uploads",
-        max_scenes=str(target_scenes)
-    )
-
-    prompt += f"\n\nIMPORTANT: The 'audio_narration' across all scenes MUST total at least 150 words. Do not write short scripts. Generate exactly {target_scenes} scenes."
-
-    raw = get_openai_response(prompt, temperature=0.6, is_json=True)
-    obj = extract_json_from_text(raw) or json.loads(raw)
-    if not obj: raise RuntimeError("Storyboard generation failed")
-    
-    try:
-        return StoryboardSchema(**obj).dict()
-    except ValidationError:
-        return {"video_title": "Untitled", "scenes": obj.get("scenes", []), "characters": obj.get("characters", [])}
-
-# -------------------------
-# [FIXED] Multi-Voice Logic (SaaS Ready)
-# -------------------------
-def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
-    """
-    Refines the script to ensure strict dialogue splitting for Multi-Voice.
-    [SaaS UPDATE] Completely dynamic. Works with ANY character names provided by the user.
-    """
-    characters = storyboard.get('characters', [])
-    
-    # Flatten scenes for analysis
-    full_script_text = " ".join([s.get('audio_narration', '') for s in storyboard.get('scenes', [])])
-
-    # [CRITICAL] We use generic examples (Hero/Villain) so the AI understands the FORMAT,
-    # but strictly uses the CHARACTERS AVAILABLE list for the actual content.
+def create_video_storyboard_agent(keyword: str, form_data: dict) -> dict:
+    # We explicitly ask for 'character_name' in every scene to enable multi-character support
     prompt = f"""
-    You are a Voice Director.
-    TASK: Convert this raw script into a STRICT JSON list of audio segments.
+    TASK: Create a 7-scene viral short film script for '{keyword}' formatted for a vertical Reel (9:16).
     
-    REAL CHARACTERS IN THIS MOVIE (Use ONLY these names):
-    {json.dumps(characters)}
+    REQUIREMENTS:
+    1. Characters: Create 2 distinct characters (e.g., Host/Expert, Hero/Villain).
+    2. Scenes: Exactly 7 scenes.
+    3. Dialogue: Every scene MUST have spoken dialogue.
     
-    RAW SCRIPT: 
-    "{full_script_text}"
-
-    RULES:
-    1. Identify who is speaking based on the context.
-    2. Map every line to one of the "REAL CHARACTERS" listed above.
-    3. If a specific character name is not found, use "Narrator".
-    4. Split long monologues into smaller chunks.
-    
-    OUTPUT FORMAT EXAMPLE (Strict JSON List):
-    [
-      {{"speaker": "Hero Name", "text": "We have to go back!"}},
-      {{"speaker": "Villain Name", "text": "It is too late."}},
-      {{"speaker": "Narrator", "text": "The hero looked at the horizon."}}
-    ]
+    OUTPUT JSON FORMAT:
+    {{
+      "video_title": "Title",
+      "characters": [
+         {{ "name": "Name1", "appearance_prompt": "Visual description...", "voice_gender": "male" }},
+         {{ "name": "Name2", "appearance_prompt": "Visual description...", "voice_gender": "female" }}
+      ],
+      "scenes": [
+         {{
+            "scene_id": 1,
+            "character_name": "Name1",  <-- CRITICAL: Who is in this scene?
+            "visual_prompt": "Description of the setting...",
+            "audio_narration": "Exact text to be spoken..."
+         }}
+      ]
+    }}
     """
 
     try:
-        # Lower temperature for deterministic JSON
-        raw = get_openai_response(prompt, temperature=0.1, is_json=True)
-        segments = extract_json_list_from_text(raw) or []
+        raw = get_openai_response(prompt, is_json=True)
+        obj = extract_json_from_text(raw) or json.loads(raw)
+        return obj
     except Exception as e:
-        logging.error(f"Script refinement failed: {e}")
-        segments = []
-
-    # Fallback to single narrator if list parsing fails
-    if not isinstance(segments, list) or len(segments) == 0:
-        logging.warning("⚠️ Script refinement failed to split dialogue. Using single narrator.")
-        return [{"speaker": "Narrator", "text": full_script_text, "voice_id": form_data.get("voice_selection")}]
-
-    final_segments = []
-    main_voice_id = form_data.get("voice_selection") or "21m00Tcm4TlvDq8ikWAM" # Default Adam (Narrator)
-    
-    for seg in segments:
-        speaker_name = seg.get("speaker", "Narrator")
-        text = seg.get("text", "")
-        if not text: continue
-
-        voice = main_voice_id 
-        
-        # [DYNAMIC SAAS LOOKUP]
-        # This matches whatever the AI returns (e.g., "John Wick") to the character list
-        # regardless of what the prompt examples were.
-        char_obj = next((c for c in characters if c.get("name") in speaker_name or speaker_name in c.get("name")), None)
-        
-        if char_obj and char_obj.get("voice_id"):
-            voice = char_obj.get("voice_id")
-        
-        final_segments.append({"text": text, "voice_id": voice})
-
-    logging.info(f"✅ Successfully split script into {len(final_segments)} audio segments.")
-    return final_segments
+         raise RuntimeError(f"Storyboard generation failed: {e}")
 
 # -------------------------
-# Character & Image Generation
+# 2. Image & Lip Sync Generators
 # -------------------------
-CHAR_DB_PATH = os.getenv("CHAR_DB_PATH", "/var/data/character_db.json")
-ensure_dir(str(Path(CHAR_DB_PATH).parent))
-
-def ensure_character(name: str, appearance_prompt: Optional[str] = None, reference_image_url: Optional[str] = None, voice_id: Optional[str] = None) -> dict:
-    try:
-        with open(CHAR_DB_PATH, "r") as f: db = json.load(f)
-    except: db = {}
-    if name in db: return db[name]
-    db[name] = {
-        "id": str(uuid.uuid4()),
-        "name": name,
-        "appearance_prompt": appearance_prompt or f"{name}, photorealistic",
-        "reference_image": reference_image_url,
-        "voice_id": voice_id
-    }
-    with open(CHAR_DB_PATH, "w") as f: json.dump(db, f, indent=2)
-    return db[name]
-
-def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
-    logging.info(f"Generating keyframe: {prompt[:50]}...")
-    output = replicate.run("black-forest-labs/flux-schnell", input={"prompt": prompt, "aspect_ratio": aspect, "output_format": "jpg"})
+@retry(reraise=True, stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=4, max=30), retry=retry_if_exception_type(ReplicateError))
+def generate_flux_image_safe(prompt: str, aspect: str = "9:16") -> str:
+    """Generates an image using Replicate (Flux Schnell - Fast/Cheap)."""
+    if not REPLICATE_API_TOKEN: raise RuntimeError("Replicate Token Missing")
+    logging.info(f"🎨 Generating Image...")
+    output = replicate.run(
+        "black-forest-labs/flux-schnell",
+        input={"prompt": prompt, "aspect_ratio": aspect, "output_format": "jpg", "num_inference_steps": 4}
+    )
     return str(output[0]) if isinstance(output, (list, tuple)) else str(output)
 
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_fixed(10), retry=retry_if_exception_type(ReplicateError))
+def generate_lip_sync_safe(image_url: str, audio_url: str) -> str:
+    """Generates lip-sync video using SadTalker (Budget Friendly)."""
+    logging.info(f"👄 Generating Lip Sync Video...")
+    output = replicate.run(
+        "cjwbw/sadtalker:a519a502c74ac74325776184f17a54342880017f848988a641dd1e88e8945d81",
+        input={
+            "source_image": image_url, 
+            "driven_audio": audio_url, 
+            "still": True, # Keeps head stable, better for reels
+            "enhancer": "gfpgan" # Face restoration
+        }
+    )
+    return str(output)
+
 # -------------------------
-# [FIXED] Scene Processor (Rate Limits & Animation)
+# 3. Scene Processor (Multi-Character Logic)
 # -------------------------
-def process_single_scene(scene: dict, index: int, character_profile: str, aspect: str = "16:9") -> (int, Optional[str]):
+def process_single_scene(
+    scene: dict, 
+    index: int, 
+    character_map: Dict[str, dict], 
+    default_char_key: str,
+    aspect: str = "9:16"
+) -> (int, Optional[str]):
+    
     try:
-        # [CRITICAL] Sleep to avoid Replicate 429 (Rate Limit)
-        # Random sleep between 15s and 30s to spread out requests
-        sleep_time = random.randint(15, 30)
-        logging.info(f"Scene {index}: Sleeping {sleep_time}s to respect rate limits...")
-        time.sleep(sleep_time)
+        logging.info(f"--- Processing Scene {index+1} ---")
 
-        if scene.get("image_url") and str(scene.get("image_url")).endswith(".mp4"):
-            return (index, scene.get("image_url"))
-
-        # 1. Generate Base Image
-        if scene.get("image_url"):
-            keyframe_url = scene.get("image_url")
-        else:
-            visual_setting = scene.get("visual_prompt", "")
-            human_texture = "detailed skin pores, natural skin texture, subsurface scattering, 8k"
-            negative_constraints = " --no plastic, doll, 3d render, airbrushed, shiny skin"
-            
-            full_image_prompt = f"{character_profile}, {visual_setting}, {human_texture}, cinematic lighting {negative_constraints}"
-            keyframe_url = generate_flux_image(full_image_prompt, aspect=aspect)
-
-        # 2. Animate Scene
-        # We default to Cinematic (Wan 2.1) because it works with global audio.
+        # A. Resolve Character for this specific scene
+        # The storyboard says "character_name": "Hero". We look up "Hero" in our map.
+        scene_char_name = scene.get("character_name", default_char_key)
         
-        action = scene.get("action_prompt", "") + f", camera:{scene.get('camera_angle','35mm')}"
-        video_url = generate_video_scene_with_replicate(prompt=action, image_url=keyframe_url, aspect=aspect)
+        # Fuzzy match character name (e.g. if script says "John" but map has "John Doe")
+        matched_key = next((k for k in character_map.keys() if scene_char_name in k or k in scene_char_name), default_char_key)
         
+        char_data = character_map.get(matched_key, character_map[default_char_key])
+        
+        logging.info(f"Scene {index+1} Character: {char_data['name']}")
+
+        # B. Generate Visuals
+        visual_setting = scene.get("visual_prompt", "Cinematic background")
+        # Combine Character Prompt + Scene Setting
+        full_image_prompt = f"A vertical portrait photograph of {char_data['appearance_prompt']}, {visual_setting}, looking directly at camera, 8k, photorealistic."
+        
+        keyframe_url = generate_flux_image_safe(full_image_prompt, aspect=aspect)
+
+        # --- BUDGET CHECK ---
+        if not USE_REAL_EXPENSIVE_GENERATION:
+            logging.info(f"Scene {index+1}: [SAFETY MODE] Image generated. Skipping lip-sync.")
+            return (index, keyframe_url)
+        # --------------------
+
+        # C. Generate Audio (Voice Switching)
+        dialogue = scene.get("audio_narration", "").strip()
+        voice_id = char_data.get("voice_id")
+        
+        if not dialogue:
+            logging.warning(f"Scene {index+1} has no dialogue. Returning static image.")
+            return (index, keyframe_url)
+
+        if not generate_voiceover_and_upload: 
+            raise RuntimeError("ElevenLabs client missing")
+
+        logging.info(f"Scene {index+1}: Generating Audio with Voice ID {voice_id}...")
+        scene_audio_url = generate_voiceover_and_upload(dialogue, voice_id)
+        
+        if not scene_audio_url: raise RuntimeError("Audio generation failed")
+
+        # D. Generate Lip Sync
+        video_url = generate_lip_sync_safe(keyframe_url, scene_audio_url)
         return (index, video_url)
 
     except Exception as e:
-        logging.error(f"Scene {index} error: {e}")
+        logging.error(f"Scene {index+1} Error: {e}")
         return (index, None)
 
 # -------------------------
-# Thumbnail & Metadata
+# 4. Assembly (Robust)
 # -------------------------
-def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Optional[str]:
-    prompt_template = load_prompt_template("prompt_image_synthesizer.txt")
-    if not prompt_template: prompt_template = "Thumbnail for ${article_summary}"
+def concat_videos_robust(input_paths: List[str], output_path: str):
+    logging.info(f"Concatenating {len(input_paths)} files...")
+    list_file = os.path.join(tempfile.gettempdir(), f"concat_{uuid.uuid4()}.txt")
     
-    summary = storyboard.get("video_description") or "Video"
-    characters_str = json.dumps(storyboard.get("characters", []), indent=2)
-    template = Template(prompt_template)
-    llm_prompt = template.safe_substitute(article_summary=summary, characters=characters_str, orientation=orientation)
-    ready_to_use_prompt = get_openai_response(llm_prompt, temperature=0.7, is_json=False).strip().strip('"')
+    with open(list_file, "w") as f:
+        for path in input_paths:
+            f.write(f"file '{path}'\n")
+            f.write("duration 0.04\n") # Buffer to prevent glitches
 
+    # FFmpeg concat demuxer (safest for joining clips)
+    cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", 
+        "-i", list_file,
+        "-c:v", "libx264", "-c:a", "aac", "-pix_fmt", "yuv420p",
+        output_path
+    ]
     try:
-        return generate_flux_image(ready_to_use_prompt, aspect=orientation)
-    except: return None
-
-def youtube_metadata_agent(full_script: str, keyword: str, form_data: dict, blueprint: dict) -> dict:
-    prompt_template = load_prompt_template("prompt_youtube_metadata_generator.txt")
-    if not prompt_template: return {}
-    template = Template(prompt_template)
-    prompt = template.safe_substitute(
-        primary_keyword=keyword,
-        full_script=full_script[:3000],
-        language=form_data.get("language", "english"),
-        video_type=form_data.get("video_type", "reel"),
-        blueprint_data=json.dumps(blueprint),
-        thumbnail_concept=form_data.get("thumbnail_concept", "")
-    )
-    raw = get_openai_response(prompt, temperature=0.4, is_json=True)
-    return extract_json_from_text(raw) or json.loads(raw)
-
-# -------------------------
-# Assembly (FFmpeg with NO Subtitles)
-# -------------------------
-def concat_videos_safe(input_paths: List[str], output_path: str, width: int = 1280, height: int = 720):
-    cmd = ["ffmpeg", "-y"]
-    for p in input_paths: cmd.extend(["-i", p])
-    filter_complex = ""
-    for i in range(len(input_paths)):
-        filter_complex += f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v{i}];"
-    for i in range(len(input_paths)): filter_complex += f"[v{i}]"
-    filter_complex += f"concat=n={len(input_paths)}:v=1:a=0[outv]"
-    cmd.extend(["-filter_complex", filter_complex, "-map", "[outv]", "-c:v", "libx264", "-pix_fmt", "yuv420p", output_path])
-    run_subprocess(cmd)
+        run_subprocess(cmd)
+    finally:
+        if os.path.exists(list_file): os.remove(list_file)
     return output_path
 
-def merge_audio_video_with_music(video_path: str, voice_path: str, music_url: str, output_path: str):
-    # [FIX] Unique music file path to allow concurrent users (SaaS Safe)
-    unique_music = f"bg_music_{uuid.uuid4()}.mp3"
-    music_path = os.path.join(tempfile.gettempdir(), unique_music)
+def add_background_music(video_path: str, output_path: str):
+    # Just use a default track for now
+    music_url = "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3" 
+    music_path = os.path.join(tempfile.gettempdir(), f"music_{uuid.uuid4()}.mp3")
     
     try:
         download_to_file(music_url, music_path)
-    except:
-        logging.warning("Music download failed, merging voice only.")
-        cmd = ["ffmpeg", "-y", "-i", video_path, "-i", voice_path, "-c:v", "copy", "-c:a", "aac", output_path]
+        # Mix audio: Voices 100%, Music 10%
+        cmd = [
+            "ffmpeg", "-y", "-i", video_path, "-stream_loop", "-1", "-i", music_path,
+            "-filter_complex", "[0:a]volume=1.0[a1];[1:a]volume=0.1[a2];[a1][a2]amix=inputs=2:duration=first[aout]",
+            "-map", "0:v", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-shortest", output_path
+        ]
         run_subprocess(cmd)
-        return output_path
-
-    # Mix Voice (Vol 1.0) and Music (Vol 0.15)
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-i", voice_path,
-        "-stream_loop", "-1", "-i", music_path,
-        "-filter_complex", "[1:a]volume=1.0[a1];[2:a]volume=0.15[a2];[a1][a2]amix=inputs=2:duration=first[aout]",
-        "-map", "0:v", "-map", "[aout]",
-        "-c:v", "copy", "-c:a", "aac", "-shortest",
-        output_path
-    ]
-    run_subprocess(cmd)
-    
-    # Cleanup music temp file
-    try:
-        if os.path.exists(music_path): os.remove(music_path)
-    except: pass
-    
+    except:
+        shutil.copy(video_path, output_path)
     return output_path
-
-def srt_from_narration(segments: List[dict], out_path: str):
-    """
-    Unused but kept for future feature toggle.
-    """
-    start = 0.0
-    with open(out_path, "w", encoding="utf-8") as f:
-        for i, seg in enumerate(segments):
-            text = seg.get("text","").strip()
-            if not text: continue
-            dur = max(1.0, min(len(text) / 20, 5.0))
-            end = start + dur
-            def fmt(t):
-                h, m, s, ms = int(t // 3600), int((t % 3600) // 60), int(t % 60), int((t - int(t)) * 1000)
-                return f"{h:02}:{m:02}:{s:02},{ms:03}"
-            f.write(f"{i+1}\n{fmt(start)} --> {fmt(end)}\n{text}\n\n")
-            start = end
-
-def burn_subtitles(input_video: str, srt_path: str, output_video: str):
-    """
-    Unused but kept for future feature toggle.
-    """
-    style = "Fontsize=12,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=35,Alignment=2"
-    escaped_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-    cmd = ["ffmpeg", "-y", "-i", input_video, "-vf", f"subtitles='{escaped_srt}':force_style='{style}'", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "copy", output_video]
-    run_subprocess(cmd)
-    return output_video
-
-def video_assembly_agent(scene_urls: List[str], voiceover_url: str, storyboard: dict, segments: List[dict], aspect: str = "16:9", music_tone: str = "motivational"):
-    tmpdir = tempfile.mkdtemp(prefix="assemble_")
-    try:
-        local_scene_paths = []
-        for i, url in enumerate(scene_urls):
-            if not url: continue
-            local_path = os.path.join(tmpdir, f"scene_{i}.mp4")
-            download_to_file(url, local_path)
-            local_scene_paths.append(local_path)
-
-        if not local_scene_paths: raise RuntimeError("No videos to assemble")
-
-        local_voice = os.path.join(tmpdir, "voice.mp3")
-        download_to_file(voiceover_url, local_voice)
-
-        width, height = (1280, 720) if aspect == "16:9" else (720, 1280)
-        concat_out = os.path.join(tmpdir, "concat.mp4")
-        concat_videos_safe(local_scene_paths, concat_out, width, height)
-
-        merged_out = os.path.join(tmpdir, "merged.mp4")
-        music_url = MUSIC_LIBRARY.get(music_tone, MUSIC_LIBRARY["default"])
-        
-        # [FIX] Clean Output - Removed Subtitle Burning logic
-        final_out = os.path.join(tmpdir, "final_clean.mp4")
-        merge_audio_video_with_music(concat_out, local_voice, music_url, final_out)
-
-        return safe_upload_to_cloudinary(final_out, folder="final_videos")
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
 
 # -------------------------
 # Celery Task (Main)
 # -------------------------
-@celery.task(bind=True)
+@celery.task(bind=True, time_limit=1800)
 def background_generate_video(self, form_data: dict):
     task_id = getattr(self.request, "id", "unknown")
     logging.info(f"[{task_id}] Task started.")
-    
+
+    if not OPENAI_API_KEY or not REPLICATE_API_TOKEN: 
+        raise ValueError("Missing API Keys")
+
     try:
         def update_status(msg):
             self.update_state(state="PROGRESS", meta={"message": msg})
-            logging.info(msg)
+            logging.info(f"STATUS: {msg}")
 
-        keyword = form_data.get("keyword")
-        if not keyword: raise ValueError("Keyword required")
-
-        # 1. Scrape & Blueprint
-        update_status("Analyzing...")
-        scraped = scrape_youtube_videos(keyword)
-        blueprint = analyze_competitors(scraped)
-
-        # 2. Storyboard
-        update_status("Storyboarding...")
-        storyboard = create_video_storyboard_agent(keyword, blueprint, form_data)
-
-        # 3. Characters
-        update_status("Characters...")
-        characters = storyboard.get("characters") or []
-        uploaded_images = form_data.get("uploaded_images") or []
-        
-        if uploaded_images:
-             if not characters:
-                 for i, url in enumerate(uploaded_images):
-                     characters.append({"name": f"Character {i+1}", "reference_image_url": url})
-                 storyboard["characters"] = characters
-             else:
-                 for i, url in enumerate(uploaded_images):
-                     if i < len(characters):
-                         characters[i]["reference_image_url"] = url
-
-        for ch in characters:
-            ensure_character(ch.get("name", "Main"), ch.get("appearance_prompt"), ch.get("reference_image_url"), ch.get("voice_id"))
-        
-        char_profile = characters[0].get("appearance_prompt", "Cinematic") if characters else "Cinematic"
-
-        # 4. Audio (Fixing Voices)
-        update_status("Generating Voices (Split)...")
-        segments = refine_script_with_roles(storyboard, form_data)
-        full_script = " ".join([s.get("text","") for s in segments])
-        
-        if generate_multi_voice_audio:
-            voiceover_url = generate_multi_voice_audio(segments)
-        elif generate_voiceover_and_upload:
-            voiceover_url = generate_voiceover_and_upload(full_script, "21m00Tcm4TlvDq8ikWAM")
-        else:
-            raise RuntimeError("Voiceover client unavailable")
-
-        # 5. Scenes (Sequential to avoid Rate Limit)
-        update_status("Generating Scenes...")
+        # 1. Generate Storyboard
+        update_status("Step 1/4: Writing Script...")
+        storyboard = create_video_storyboard_agent(form_data.get("keyword"), form_data)
         scenes = storyboard.get("scenes", [])
-        scene_urls = [None] * len(scenes)
-        aspect = "9:16" if form_data.get("video_type") == "reel" else "16:9"
         
-        # [CRITICAL] Max workers = 1 to prevent 429
+        # 2. Build Character Map (Name -> {Prompt, VoiceID})
+        update_status("Step 2/4: Casting Characters...")
+        char_list = storyboard.get("characters", [])
+        character_map = {}
+        
+        # Define some fallback voice IDs (Male/Female)
+        # Replace these with your valid ElevenLabs Voice IDs
+        VOICE_POOL = {
+            "male": "21m00Tcm4TlvDq8ikWAM", # Adam
+            "female": "EXAVITQu4vr4xnSDxMaL" # Bella
+        }
+
+        for c in char_list:
+            name = c.get("name", "Unknown")
+            gender = c.get("voice_gender", "male").lower()
+            # If user provided a voice in form_data, use it for main char, else pick from pool
+            vid = form_data.get("voice_selection") if name == char_list[0].get("name") else VOICE_POOL.get(gender, VOICE_POOL["male"])
+            
+            character_map[name] = {
+                "name": name,
+                "appearance_prompt": c.get("appearance_prompt", f"Portrait of {name}"),
+                "voice_id": vid
+            }
+        
+        if not character_map:
+            # Fallback if AI didn't return characters
+            character_map["Narrator"] = {"name": "Narrator", "appearance_prompt": "A presenter", "voice_id": VOICE_POOL["male"]}
+
+        main_char_key = list(character_map.keys())[0] # Default fallback
+
+        # 3. Process Scenes (Parallel-ish but limited to save rate limits)
+        update_status("Step 3/4: Generating Scenes (Images + Audio + Lip Sync)...")
+        scene_urls = [None] * len(scenes)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future_to_idx = {executor.submit(process_single_scene, scenes[i], i, char_profile, aspect): i for i in range(len(scenes))}
+            future_to_idx = {
+                executor.submit(
+                    process_single_scene, 
+                    scene, i, character_map, main_char_key
+                ): i for i, scene in enumerate(scenes)
+            }
+            
             for future in concurrent.futures.as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
                     _, url = future.result()
-                    scene_urls[idx] = url
+                    if url: scene_urls[idx] = url
                 except Exception as e:
-                    logging.error(f"Scene {idx} error: {e}")
+                    logging.error(f"Scene {idx} failed: {e}")
 
+        # 4. Assembly
+        update_status("Step 4/4: Assembling Reel...")
         valid_urls = [u for u in scene_urls if u]
-        if not valid_urls: raise RuntimeError("All scenes failed")
+        if not valid_urls: raise RuntimeError("No scenes generated.")
 
-        # 6. Assembly
-        update_status("Assembling Final Video...")
-        # Pass tone to select music
-        tone = blueprint.get("tone", "motivational")
-        final_url = video_assembly_agent(valid_urls, voiceover_url, storyboard, segments, aspect, music_tone=tone)
+        # Standardize clips (image to video conversion if needed)
+        tmpdir = tempfile.mkdtemp()
+        local_paths = []
+        for i, url in enumerate(valid_urls):
+            ext = "mp4" if url.endswith(".mp4") else "jpg"
+            path = os.path.join(tmpdir, f"clip_{i}.{ext}")
+            download_to_file(url, path)
+            
+            out_path = os.path.join(tmpdir, f"norm_{i}.mp4")
+            if ext == "jpg":
+                # Convert static image to 4s video
+                run_subprocess(["ffmpeg", "-y", "-loop", "1", "-i", path, "-t", "4", "-c:v", "libx264", "-pix_fmt", "yuv420p", out_path])
+            else:
+                # Ensure MP4 format
+                run_subprocess(["ffmpeg", "-y", "-i", path, "-c:v", "libx264", "-c:a", "aac", out_path])
+            local_paths.append(out_path)
 
-        # 7. Metadata
-        update_status("Generating Metadata...")
-        thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
-        metadata = youtube_metadata_agent(full_script, keyword, form_data, blueprint)
+        concat_path = os.path.join(tmpdir, "concat.mp4")
+        concat_videos_robust(local_paths, concat_path)
+        
+        final_path = os.path.join(tmpdir, "final.mp4")
+        add_background_music(concat_path, final_path)
 
-        return {
-            "status": "ready",
-            "video_url": final_url,
-            "thumbnail_url": thumbnail_url,
-            "metadata": metadata,
-            "storyboard": storyboard
-        }
+        final_url = safe_upload_to_cloudinary(final_path)
+        
+        shutil.rmtree(tmpdir)
+        
+        return {"status": "completed", "video_url": final_url}
 
     except Exception as e:
-        logging.error(f"Task failed: {traceback.format_exc()}")
         self.update_state(state="FAILURE", meta={"error": str(e)})
         raise
