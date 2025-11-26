@@ -244,7 +244,7 @@ def generate_lip_sync_safe(image_url: str, audio_url: str) -> str:
     """Generates lip-sync video using sadtalker on Replicate."""
     logging.info(f"👄 Starting Lip Sync generation (SadTalker)...")
     
-    # --- UPDATED MODEL VERSION BELOW ---
+    # --- CORRECTED MODEL STRING BELOW (Owner/Model:Version) ---
     output = replicate.run(
         "cjwbw/sadtalker:3aa3dac937e5675cb5761e31c50853e66172d54467d16781206152b12267191d",
         input={
@@ -253,9 +253,7 @@ def generate_lip_sync_safe(image_url: str, audio_url: str) -> str:
             "still": True, 
             "enhancer": "gfpgan",
             "preprocess": "full",
-            "expression_scale": 1.0,
-            "ref_eyeblink": None,
-            "ref_pose": None
+            "expression_scale": 1.0
         }
     )
     return str(output)
