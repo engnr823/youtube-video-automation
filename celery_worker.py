@@ -445,7 +445,14 @@ def video_assembly_agent(scene_urls: List[str], aspect: str = "9:16", music_tone
                 if is_video:
                     # It's a video (lip sync or atmospheric). Just copy it.
                     # Ideally, re-encode to standard format here to ensure compatibility.
-                    run_subprocess(["ffmpeg", "-y", "-i", local_path, "-c:v", "libx264", "-c:a", "aac", normalized_path])
+                    run_subprocess([
+                    "ffmpeg", "-y",
+                    "-loop", "1", "-i", local_path,  # Input 0: The Image
+                    "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", # Input 1: Silent Audio Generator
+                    "-c:v", "libx264", "-t", "3", "-pix_fmt", "yuv420p", "-vf", "scale=720:1280",
+                    "-c:a", "aac", "-shortest",      # Encode audio and stop when image loop ends
+                    normalized_path
+                ])
                     local_scene_paths.append(normalized_path)
                 else:
                     # It's an image (Budget Mode active). Convert to 3s static video.
