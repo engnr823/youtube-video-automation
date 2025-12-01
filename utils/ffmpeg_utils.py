@@ -2,82 +2,92 @@ import os
 import logging
 import subprocess
 import uuid
-from typing import List
+import shutil
+from typing import List, Tuple
 
-def stitch_video_with_audio(scene_paths: List[str], voiceover_path: str, output_path: str) -> bool:
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+
+def get_media_duration(file_path):
+    """Returns the duration of a media file in seconds using ffprobe."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return float(result.stdout.strip())
+    except Exception as e:
+        logging.error(f"Error getting duration for {file_path}: {e}")
+        return 0.0
+
+def stitch_video_audio_pairs(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     """
-    Stitches multiple video clips together, adds a voiceover, and saves the result.
-
-    This function uses a robust ffmpeg command that re-encodes video streams
-    to ensure compatibility between clips from different sources.
-
-    Args:
-        scene_paths (List[str]): A list of local file paths for the video scenes.
-        voiceover_path (str): The local file path for the voiceover audio.
-        output_path (str): The local file path to save the final assembled video.
-
-    Returns:
-        bool: True if the stitching was successful, False otherwise.
+    Stitches (video, audio) pairs. 
+    - Ensures Video matches Audio length (loops/cuts video).
+    - Uses UUIDs to prevent file conflicts in Flask.
     """
-    logging.info("Invoking FFMPEG utility to stitch video...")
-
-    if not scene_paths:
-        logging.error("🔴 FFMPEG Error: No scene paths provided.")
-        return False
-    if not voiceover_path or not os.path.exists(voiceover_path):
-        logging.error(f"🔴 FFMPEG Error: Voiceover path '{voiceover_path}' does not exist.")
-        return False
-
-    # Create a temporary file list for ffmpeg's concat demuxer
-    concat_file_path = f"/tmp/concat_{uuid.uuid4()}.txt"
+    
+    # Generate a unique ID for this specific request to prevent collision
+    request_id = str(uuid.uuid4())
+    temp_dir = os.path.join("/tmp", f"render_{request_id}")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    input_list_path = os.path.join(temp_dir, "inputs.txt")
+    chunk_paths = []
 
     try:
-        with open(concat_file_path, "w") as f:
-            for path in scene_paths:
-                if os.path.exists(path):
-                    # Sanitize file path for ffmpeg
-                    f.write(f"file '{os.path.abspath(path)}'\n")
-                else:
-                    logging.warning(f"⚠️ Warning: Scene path not found and skipped: {path}")
-        
-        # Build the robust ffmpeg command
-        cmd = [
-            "ffmpeg",
-            "-y",                   # Overwrite output file if it exists
-            "-f", "concat",         # Use the concat demuxer
-            "-safe", "0",           # Disable safety checks for file paths
-            "-i", concat_file_path, # Input file list
-            "-i", voiceover_path,   # Second input: the voiceover audio
-            "-c:v", "libx264",      # Re-encode video to the standard H.264 codec
-            "-pix_fmt", "yuv420p",  # Pixel format for maximum compatibility
-            "-preset", "fast",      # A good balance between encoding speed and quality
-            "-c:a", "aac",          # Encode audio to the standard AAC codec
-            "-shortest",            # Finish encoding when the shortest input stream ends (the video)
-            output_path             # The final output file path
-        ]
-        
-        logging.info(f"Executing FFMPEG command: {' '.join(cmd)}")
-        
-        # Execute the command
-        subprocess.run(
-            cmd,
-            check=True,             # Raise an exception if ffmpeg returns a non-zero exit code
-            capture_output=True,    # Capture stdout and stderr
-            text=True
-        )
-        
-        logging.info(f"✅ FFMPEG stitching complete. Output saved to: {output_path}")
+        logging.info(f"Processing {len(scene_pairs)} pairs for Request ID: {request_id}")
+
+        # 1. Process chunks (Sync Video length to Audio length)
+        for i, (video, audio) in enumerate(scene_pairs):
+            chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
+            
+            # Get duration to force video match
+            audio_dur = get_media_duration(audio)
+            if audio_dur == 0:
+                logging.warning(f"Audio duration is 0 for {audio}, skipping chunk.")
+                continue
+
+            # Command: Loop video (-stream_loop -1) + Cut at audio length (-t)
+            # Added: -pix_fmt yuv420p for better compatibility with players
+            cmd = [
+                "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
+                "-t", str(audio_dur), 
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast",
+                "-c:a", "aac", "-shortest",
+                chunk_name
+            ]
+            
+            subprocess.run(cmd, check=True, capture_output=True)
+            chunk_paths.append(chunk_name)
+
+        # 2. Write the Concat List
+        with open(input_list_path, "w") as f:
+            for chunk in chunk_paths:
+                # Use absolute path and escape single quotes for safety
+                abs_path = os.path.abspath(chunk).replace("'", "'\\''")
+                f.write(f"file '{abs_path}'\n")
+
+        # 3. Concatenate Chunks
+        logging.info("Concatenating chunks...")
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", 
+            "-i", input_list_path, "-c", "copy", output_path
+        ], check=True, capture_output=True)
+
+        logging.info(f"✅ Video successfully saved to {output_path}")
         return True
 
     except subprocess.CalledProcessError as e:
-        # Log the detailed error message from ffmpeg if it fails
-        logging.error(f"🔴 FFMPEG Error during stitching: {e.stderr}")
+        logging.error(f"FFmpeg failed: {e}")
         return False
     except Exception as e:
-        logging.error(f"🔴 An unexpected error occurred in the FFMPEG utility: {e}")
+        logging.error(f"General stitching error: {e}")
         return False
     finally:
-        # Clean up the temporary concat file list
-        if os.path.exists(concat_file_path):
-            os.remove(concat_file_path)
-            logging.info(f"Cleaned up temporary concat file: {concat_file_path}")
+        # cleanup the whole temp directory for this request
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            logging.info(f"Cleaned up temp dir: {temp_dir}")
