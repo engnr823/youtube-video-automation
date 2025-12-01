@@ -12,7 +12,7 @@ STATUS_ENDPOINT = f"{API_HOST}/v1/tasks/"
 if not LUMA_API_KEY:
     logging.warning("🔴 WARNING: LUMA_API_KEY is not set. Video generation will fail.")
 
-def generate_video_scene_and_upload(prompt: str, duration: int) -> str:
+def generate_video_scene_and_upload(prompt: str, duration: int, aspect: str = "16:9") -> str:
     """
     Generates a video scene using Luma AI's asynchronous API.
     
@@ -22,6 +22,7 @@ def generate_video_scene_and_upload(prompt: str, duration: int) -> str:
     Args:
         prompt (str): The visual prompt for the video scene.
         duration (int): The desired duration (note: Luma's API may have its own limits).
+        aspect (str): The aspect ratio (e.g., "16:9" or "9:16").
 
     Returns:
         str: The URL of the generated MP4 video file.
@@ -34,12 +35,11 @@ def generate_video_scene_and_upload(prompt: str, duration: int) -> str:
     # --- 1. Initiate Generation ---
     payload = {
         "user_prompt": prompt,
-        "aspect_ratio": "16:9",
+        "aspect_ratio": aspect,  # [FIX] Dynamic Aspect Ratio used here
         # Note: Luma's API might have specific ways to handle duration or it might be fixed.
-        # This payload is a standard representation.
     }
     
-    logging.info(f"Initiating Luma video generation for prompt: '{prompt[:70]}...'")
+    logging.info(f"Initiating Luma video generation for prompt: '{prompt[:70]}...' | Aspect: {aspect}")
     try:
         response = requests.post(GENERATION_ENDPOINT, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
