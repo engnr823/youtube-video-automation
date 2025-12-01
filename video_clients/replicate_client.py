@@ -36,13 +36,19 @@ def generate_video_scene_with_replicate(prompt: str, image_url: str = None, aspe
         
         output = replicate.run(SCENE_MODEL_ID, input=input_payload)
 
-        # Handle output (Replicate usually returns a list for video models)
-        video_url = output[0] if isinstance(output, list) else str(output)
+        # [FIX] Safer Return Logic
+        # Checks if output is a list (common for video models) and ensures it's not empty.
+        if isinstance(output, list) and len(output) > 0:
+            video_url = output[0]
+        else:
+            video_url = str(output)
+
         return video_url
 
     except Exception as e:
         logging.error(f"🔴 Replicate Cinematic Animation Error: {e}")
         # If video generation fails, return the image so the pipeline doesn't break
+        # The worker will handle this image as a static video fallback.
         return image_url 
 
 def generate_lip_sync_with_replicate(image_url: str, audio_url: str) -> str:
@@ -66,7 +72,10 @@ def generate_lip_sync_with_replicate(image_url: str, audio_url: str) -> str:
                 "still": True # Keeps head stable, focuses on mouth movement
             }
         )
-        # SadTalker returns a single URL string
+        
+        # [FIX] Apply same safety logic here just in case
+        if isinstance(output, list) and len(output) > 0:
+            return output[0]
         return str(output)
 
     except Exception as e:
