@@ -147,3 +147,22 @@ def generate_multi_voice_audio(segments: List[Dict[str, str]]) -> str:
             if os.path.exists(f): os.remove(f)
         if 'concat_list_path' in locals() and os.path.exists(concat_list_path): os.remove(concat_list_path)
         if 'final_output_path' in locals() and os.path.exists(final_output_path): os.remove(final_output_path)
+
+# --- CORRECTED PLACEMENT: Indentation fixed here ---
+def generate_audio_for_scene(text: str, voice_id: str) -> str:
+    """Generates audio for a single scene and returns the local file path."""
+    if not client: raise ConnectionError("ElevenLabs client not initialized")
+    
+    temp_dir = tempfile.gettempdir()
+    filename = os.path.join(temp_dir, f"scene_audio_{uuid.uuid4()}.mp3")
+    
+    try:
+        audio_gen = client.text_to_speech.convert(
+            text=text, voice_id=voice_id, model_id="eleven_multilingual_v2"
+        )
+        with open(filename, 'wb') as f:
+            for chunk in audio_gen: f.write(chunk)
+        return filename
+    except Exception as e:
+        logging.error(f"Audio gen failed: {e}")
+        return None
