@@ -50,10 +50,15 @@ except ImportError:
     generate_audio_for_scene = None
 
 try:
-    from video_clients.replicate_client import generate_video_scene_with_replicate
+    # [UPDATED] Imported Lip-Sync function here
+    from video_clients.replicate_client import (
+        generate_video_scene_with_replicate, 
+        generate_lip_sync_with_replicate
+    )
 except ImportError:
     logging.warning("⚠️ Replicate client not found. Video generation will fail.")
     generate_video_scene_with_replicate = None
+    generate_lip_sync_with_replicate = None
 # ----------------------------------
 
 # -------------------------
@@ -312,39 +317,70 @@ def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
     return str(output[0]) if isinstance(output, (list, tuple)) else str(output)
 
 # -------------------------
-# [UPDATED] Scene Processor (Returns Local Path)
+# [UPDATED] Scene Processor 
 # -------------------------
-def process_single_scene(scene: dict, index: int, character_profile: str, aspect: str = "16:9") -> dict:
+def process_single_scene(
+    scene: dict, 
+    index: int, 
+    character_profile: str, 
+    audio_path: str = None,   # [UPDATED] Pass audio for syncing
+    reference_img_url: str = None, # [UPDATED] Pass master face for consistency
+    aspect: str = "16:9"
+) -> dict:
     """
-    SaaS Updated: Returns a dictionary with status and LOCAL file path.
-    Does NOT return a URL. This allows us to stitch locally before uploading.
+    Generates a scene video. 
+    1. Uses 'reference_img_url' if available (Consistency).
+    2. If audio exists, runs 'generate_lip_sync_with_replicate' (Talking Head).
+    3. If no audio, runs 'generate_video_scene_with_replicate' (Cinematic B-Roll).
     """
     try:
         # Rate Limit Buffer
-        sleep_time = random.randint(10, 20)
+        sleep_time = random.randint(5, 15)
         time.sleep(sleep_time)
 
-        # 1. Generate/Get Base Image
+        # --- A. CHARACTER CONSISTENCY LOGIC ---
+        # If we have a Master Reference Image (generated once at start), use it!
+        # Otherwise, generate a fresh one (Only for Scene 0 or B-Roll).
+        keyframe_url = None
+        
         if scene.get("image_url") and str(scene.get("image_url")).endswith(".mp4"):
-            # If user uploaded a video, download it
-            temp_path = f"/tmp/user_upload_{index}_{uuid.uuid4()}.mp4"
-            download_to_file(scene.get("image_url"), temp_path)
-            return {"index": index, "video_path": temp_path, "status": "success"}
+             # If user uploaded a video directly
+             temp_path = f"/tmp/user_upload_{index}_{uuid.uuid4()}.mp4"
+             download_to_file(scene.get("image_url"), temp_path)
+             return {"index": index, "video_path": temp_path, "status": "success"}
 
         if scene.get("image_url"):
-            keyframe_url = scene.get("image_url")
+            keyframe_url = scene.get("image_url") # User manual upload (per scene)
+        elif reference_img_url:
+            keyframe_url = reference_img_url # <--- USE THE CONSISTENT ACTOR FACE
         else:
+            # Fallback: Only generate new face if we absolutely have to
             visual_setting = scene.get("visual_prompt", "")
             human_texture = "detailed skin pores, natural skin texture, 8k"
             negative = " --no plastic, doll, 3d render, cartoon"
             full_prompt = f"{character_profile}, {visual_setting}, {human_texture}, cinematic lighting {negative}"
             keyframe_url = generate_flux_image(full_prompt, aspect=aspect)
 
-        # 2. Animate
-        action = scene.get("action_prompt", "subtle movement") + f", camera:{scene.get('camera_angle','35mm')}"
-        video_url = generate_video_scene_with_replicate(prompt=action, image_url=keyframe_url, aspect=aspect)
+        # --- B. SELECT GENERATION ENGINE (Lip-Sync vs Cinematic) ---
+        video_url = None
         
-        # 3. Download Immediately
+        # Check if this scene has dialogue AND we have audio
+        has_dialogue = bool(scene.get("audio_narration") and len(scene.get("audio_narration")) > 2)
+        
+        if has_dialogue and audio_path and generate_lip_sync_with_replicate:
+            # Upload local audio to cloud so Replicate can access it
+            cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
+            
+            # CALL LIP-SYNC (SadTalker / Wav2Lip)
+            # This makes the "keyframe_url" face talk using "cloud_audio_url"
+            video_url = generate_lip_sync_with_replicate(keyframe_url, cloud_audio_url)
+            
+        else:
+            # NO Dialogue -> Use Cinematic Action (Wan 2.1 / Luma)
+            action = scene.get("action_prompt", "subtle movement") + f", camera:{scene.get('camera_angle','35mm')}"
+            video_url = generate_video_scene_with_replicate(prompt=action, image_url=keyframe_url, aspect=aspect)
+        
+        # 3. Download Result
         temp_video_path = f"/tmp/scene_gen_{index}_{uuid.uuid4()}.mp4"
         download_to_file(video_url, temp_video_path)
         
@@ -413,6 +449,18 @@ def background_generate_video(self, form_data: dict):
 
         char_profile = characters[0].get("appearance_prompt", "Cinematic") if characters else "Cinematic"
 
+        # [UPDATED] GENERATE MASTER CHARACTER IMAGE ONCE (Consistency Fix)
+        # Check if user uploaded a face, otherwise generate one "Actor" for the whole movie
+        master_face_url = None
+        if uploaded_images:
+            master_face_url = uploaded_images[0]
+        else:
+            # Generate the Hero Face
+            update_status("Casting AI Actor (Generating Consistent Face)...")
+            aspect_ratio = "9:16" if form_data.get("video_type") == "reel" else "16:9"
+            hero_prompt = f"Portrait of {char_profile}, facing camera, neutral expression, high detailed, 8k"
+            master_face_url = generate_flux_image(hero_prompt, aspect=aspect_ratio)
+
         # 3. [NEW] Audio-First Pipeline
         update_status("Synthesizing Audio Dialogue...")
         segments = refine_script_with_roles(storyboard, form_data)
@@ -461,8 +509,17 @@ def background_generate_video(self, form_data: dict):
         
         # Parallel Execution
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            # [UPDATED] Pass master_face_url and audio_path to scene processor
             future_to_asset = {
-                executor.submit(process_single_scene, asset["scene_data"], asset["index"], char_profile, aspect): asset
+                executor.submit(
+                    process_single_scene, 
+                    asset["scene_data"], 
+                    asset["index"], 
+                    char_profile, 
+                    asset["audio_path"],   # <--- PASS AUDIO PATH
+                    master_face_url,       # <--- PASS CONSISTENT FACE URL
+                    aspect
+                ): asset
                 for asset in scene_assets
             }
             
@@ -525,7 +582,8 @@ def background_generate_video(self, form_data: dict):
                 "-c:v", "copy", "-c:a", "aac", "-shortest",
                 final_output_path
             ]
-            run_subprocess(cmd)
+            # [UPDATED] Replaced missing run_subprocess with standard subprocess.run
+            subprocess.run(cmd, check=True)
         else:
             # No music, just rename
             shutil.move(temp_visual_path, final_output_path)
