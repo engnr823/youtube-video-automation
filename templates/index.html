@@ -90,7 +90,7 @@
                     </div>
                     <div class="col-md-6">
                         <label class="form-label">Length (Scenes)</label>
-                        <input type="number" class="form-control" name="max_scenes" value="7" min="3" max="15">
+                        <input type="number" class="form-control" name="max_scenes" value="10" min="3" max="60" placeholder="Max 60">
                     </div>
                 </div>
             </fieldset>
@@ -167,7 +167,7 @@
             const formData = new FormData(form);
             const details = document.getElementById("character_details").value;
             
-            // [FIXED] Send character details as a separate field, NOT merged with keyword
+            // Send character details as a separate field
             if (details.trim()) {
                 formData.append("characters", details);
             }
