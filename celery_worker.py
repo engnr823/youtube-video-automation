@@ -85,15 +85,25 @@ else:
     replicate_client = None
 
 # -------------------------
-# ROYALTY-FREE MUSIC LIBRARY
+# ROYALTY-FREE MUSIC LIBRARY (EXPANDED & SHUFFLED)
 # -------------------------
-MUSIC_LIBRARY = {
-    "motivational": "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3",
-    "sad": "https://cdn.pixabay.com/download/audio/2021/11/24/audio_8243a76035.mp3",
-    "intense": "https://cdn.pixabay.com/download/audio/2022/03/24/audio_07b04b67e0.mp3",
-    "happy": "https://cdn.pixabay.com/download/audio/2022/01/18/audio_d0a13f69d2.mp3",
-    "default": "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3"
-}
+# This list is used for random selection (shuffling)
+ALL_MUSIC_URLS = [
+    # Original Tracks
+    "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3", # Motivational/Default
+    "https://cdn.pixabay.com/download/audio/2021/11/24/audio_8243a76035.mp3", # Sad
+    "https://cdn.pixabay.com/download/audio/2022/03/24/audio_07b04b67e0.mp3", # Intense
+    "https://cdn.pixabay.com/download/audio/2022/01/18/audio_d0a13f69d2.mp3", # Happy
+    
+    # Added Diverse/Viral-Style Tracks for Shuffling
+    "https://cdn.pixabay.com/audio/2022/07/22/powerful-8526.mp3", # Epic/Powerful
+    "https://cdn.pixabay.com/audio/2022/07/26/cinematic-ambient-11634.mp3", # Cinematic Ambient
+    "https://cdn.pixabay.com/audio/2022/10/25/the-future-is-now-12499.mp3", # Viral Electronic/Tech
+    "https://cdn.pixabay.com/audio/2023/07/11/lo-fi-149024.mp3", # Lofi/Chill
+    "https://cdn.pixabay.com/audio/2022/04/27/fantasy-10878.mp3", # Fantasy/Epic
+    "https://cdn.pixabay.com/audio/2022/09/20/emotional-128225.mp3", # New Emotional Piano
+    "https://cdn.pixabay.com/audio/2023/12/06/trailer-mood-176840.mp3" # Dark Trailer Mood
+]
 
 # -------------------------
 # DATA SCHEMAS
@@ -217,9 +227,7 @@ def normalize_replicate_output(raw):
     except Exception: return str(raw)
 
 def get_latest_model_version_id(model_name: str) -> Optional[str]:
-    # Skip version check for models we know have issues or are official
-    if "flux" in model_name or "wan-video" in model_name or "sadtalker" in model_name:
-        return None
+    if "flux" in model_name or "wan-video" in model_name or "sadtalker" in model_name: return None
     if not replicate_client: raise RuntimeError("Replicate client not configured")
     try:
         model = replicate_client.models.get(model_name)
@@ -232,23 +240,16 @@ def get_latest_model_version_id(model_name: str) -> Optional[str]:
 
 def replicate_run_safe(model_name: str, **kwargs) -> Optional[str]:
     if not replicate_client: raise RuntimeError("Replicate client not configured")
-    
-    # 1. Try Direct Run
     try:
-        logging.info(f"Replicate: running {model_name}")
         raw = replicate_client.run(model_name, **kwargs)
         return normalize_replicate_output(raw)
     except Exception as e:
         logging.warning(f"Direct run failed for {model_name}, trying version resolve: {e}")
-    
-    # 2. Resolve Version (Fallback)
-    version_id = get_latest_model_version_id(model_name)
-    if not version_id:
-        raise RuntimeError(f"Model run failed for {model_name} (No version found)")
-    
-    model_ref = f"{model_name}:{version_id}"
-    raw = replicate_client.run(model_ref, **kwargs)
-    return normalize_replicate_output(raw)
+        version_id = get_latest_model_version_id(model_name)
+        if not version_id: raise RuntimeError(f"Model run failed for {model_name} (No version found)")
+        model_ref = f"{model_name}:{version_id}"
+        raw = replicate_client.run(model_ref, **kwargs)
+        return normalize_replicate_output(raw)
 
 # -------------------------
 # AI GENERATORS
@@ -257,9 +258,8 @@ def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
     model_name = "black-forest-labs/flux-schnell"
     input_payload = {"prompt": prompt, "aspect_ratio": aspect, "output_format": "jpg"}
     for i in range(2):
-        try:
-            return str(replicate_run_safe(model_name, input=input_payload))
-        except Exception: time.sleep(1)
+        try: return str(replicate_run_safe(model_name, input=input_payload))
+        except: time.sleep(1)
     raise RuntimeError("Flux image generation failed")
 
 def generate_audio_robust(text: str, voice_id: str) -> str:
@@ -267,35 +267,25 @@ def generate_audio_robust(text: str, voice_id: str) -> str:
     if ELEVENLABS_AVAILABLE and generate_audio_for_scene:
         try:
             res = generate_audio_for_scene(text, voice_id)
-            if res and isinstance(res, dict) and res.get("path"):
-                return res["path"]
-        except Exception as e:
-            logging.warning(f"⚠️ ElevenLabs failed: {e}. Switching to OpenAI.")
-
+            if res and isinstance(res, dict) and res.get("path"): return res["path"]
+        except: pass
     # 2. OpenAI
     if openai_client:
         try:
-            logging.info("🎙️ Using OpenAI TTS Fallback...")
             safe_id = str(uuid.uuid4())
             output_path = os.path.join(tempfile.gettempdir(), f"openai_audio_{safe_id}.mp3")
-            
             v_lower = (voice_id or "").lower()
             openai_voice = "alloy"
             if "male" in v_lower: openai_voice = "onyx"
             elif "female" in v_lower: openai_voice = "nova"
-
-            response = openai_client.audio.speech.create(
-                model="tts-1", voice=openai_voice, input=text
-            )
+            response = openai_client.audio.speech.create(model="tts-1", voice=openai_voice, input=text)
             response.stream_to_file(output_path)
             return output_path
-        except Exception as e:
-            logging.error(f"OpenAI TTS failed: {e}")
-
+        except Exception as e: logging.error(f"OpenAI TTS failed: {e}")
     raise RuntimeError("All audio generation methods failed.")
 
 # -------------------------
-# SCENE PROCESSING (BUG FIXED: No premature deletion)
+# SCENE PROCESSING
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -309,8 +299,6 @@ def process_single_scene(
     temp_dir = os.path.join("/tmp", f"scene_{index}_{request_id}")
     os.makedirs(temp_dir, exist_ok=True)
     
-    # [FIX] Do NOT put a try/finally block that deletes temp_dir here!
-    # The file must exist for the stitching process later.
     try:
         time.sleep(random.randint(1, 3))
 
@@ -331,7 +319,7 @@ def process_single_scene(
 
         video_url = None
 
-        # 1. Lip Sync (Using Reliable Model: cjwbw/sadtalker)
+        # 1. Lip Sync
         if has_dialogue and target_face_url and not is_wide:
             try:
                 cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
@@ -354,7 +342,7 @@ def process_single_scene(
             try:
                 model_name = "wan-video/wan-2.1-1.3b"
                 input_payload = {"prompt": f"{visual_prompt}, {action}", "aspect_ratio": aspect}
-                if target_face_url: input_payload["image"] = target_face_url
+                if target_face_url: input_payload["image"] = target_face_url # Image-to-Video Mode
                 video_url = replicate_run_safe(model_name, input=input_payload)
             except Exception as e:
                 logging.error(f"Cinematic failed: {e}")
@@ -364,7 +352,6 @@ def process_single_scene(
         temp_video_path = os.path.join(temp_dir, f"scene_gen_{index}.mp4")
         download_to_file(str(video_url), temp_video_path, timeout=300)
         
-        # Return path successfully. Directory stays exists!
         return {"index": index, "video_path": temp_video_path, "status": "success"}
 
     except Exception as e:
@@ -386,21 +373,16 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
         
         for i, (video, audio) in enumerate(scene_pairs):
             try:
-                # Sanity Checks
-                if not video or not os.path.exists(video):
-                    logging.warning(f"Video missing for scene {i}, skipping.")
-                    continue
-                if not audio or not os.path.exists(audio):
-                    logging.warning(f"Audio missing for scene {i}, skipping.")
-                    continue
+                if not video or not os.path.exists(video): continue
+                if not audio or not os.path.exists(audio): continue
 
                 chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
                 audio_dur = get_media_duration(audio)
                 
-                # [FIX] Force min duration 2s to prevent ffmpeg crash
+                # [FIX] Force min duration 2s to prevent ffmpeg crash on short clips
                 target_dur = max(audio_dur, 2.0)
                 
-                # FFmpeg: Loop video, Pad audio
+                # FFmpeg Command with Padding (apad)
                 cmd = [
                     "ffmpeg", "-y", 
                     "-stream_loop", "-1", "-i", video, 
@@ -561,8 +543,6 @@ def background_generate_video(self, form_data: dict):
                 except Exception as e:
                     logging.error(f"Casting failed for {name}: {e}")
 
-        char_profile = characters[0].get("appearance_prompt", "Cinematic") if characters else "Cinematic"
-
         # 3. Audio
         update_status("Synthesizing Audio Dialogue...")
         segments = refine_script_with_roles(storyboard, form_data)
@@ -587,7 +567,7 @@ def background_generate_video(self, form_data: dict):
         final_pairs = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_to_asset = {
-                executor.submit(process_single_scene, asset["scene_data"], asset["index"], char_profile, asset["audio_path"], character_faces, aspect): asset
+                executor.submit(process_single_scene, asset["scene_data"], asset["index"], "", asset["audio_path"], character_faces, aspect): asset
                 for asset in scene_assets
             }
             results_map = {}
@@ -606,8 +586,9 @@ def background_generate_video(self, form_data: dict):
 
         # 5. Stitching
         update_status("Final Assembly...")
-        music_tone = blueprint.get("tone", "motivational")
-        music_url = MUSIC_LIBRARY.get(music_tone, MUSIC_LIBRARY["default"])
+        
+        # [NEW LOGIC] Randomly select music URL from the expanded list
+        music_url = random.choice(ALL_MUSIC_URLS)
         music_path = os.path.join(tempfile.gettempdir(), f"music_{uuid.uuid4()}.mp3")
         try: download_to_file(music_url, music_path)
         except: music_path = None
@@ -636,12 +617,11 @@ def background_generate_video(self, form_data: dict):
         thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
         metadata = youtube_metadata_agent(full_script_text, keyword, form_data, blueprint)
 
-        # Cleanup: Only clean up temp files at the very end
         try:
             if os.path.exists(temp_visual_path): os.remove(temp_visual_path)
             for v, a in final_pairs:
-                # Remove the actual scene folder to keep /tmp clean
-                if v and os.path.exists(v): 
+                if os.path.exists(v): 
+                    # Clean up the scene temp directory
                     parent_dir = os.path.dirname(v)
                     if "scene_" in parent_dir: shutil.rmtree(parent_dir)
         except: pass
@@ -655,5 +635,4 @@ def background_generate_video(self, form_data: dict):
         }
 
     except Exception as e:
-        logging.error(f"Task Failed: {traceback.format_exc()}")
         return {"status": "error", "message": str(e)}
