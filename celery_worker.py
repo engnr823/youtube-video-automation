@@ -295,7 +295,7 @@ def generate_audio_robust(text: str, voice_id: str) -> str:
     raise RuntimeError("All audio generation methods failed.")
 
 # -------------------------
-# SCENE PROCESSING
+# SCENE PROCESSING (BUG FIXED: No premature deletion)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -308,6 +308,9 @@ def process_single_scene(
     request_id = str(uuid.uuid4())[:8]
     temp_dir = os.path.join("/tmp", f"scene_{index}_{request_id}")
     os.makedirs(temp_dir, exist_ok=True)
+    
+    # [FIX] Do NOT put a try/finally block that deletes temp_dir here!
+    # The file must exist for the stitching process later.
     try:
         time.sleep(random.randint(1, 3))
 
@@ -332,7 +335,6 @@ def process_single_scene(
         if has_dialogue and target_face_url and not is_wide:
             try:
                 cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
-                
                 model_name = "cjwbw/sadtalker:a519cc0cfebaaeade068b23899165a11ec76aaa1d2b313d40d214f204ec957a3"
                 input_payload = {
                     "source_image": target_face_url,
@@ -361,18 +363,16 @@ def process_single_scene(
 
         temp_video_path = os.path.join(temp_dir, f"scene_gen_{index}.mp4")
         download_to_file(str(video_url), temp_video_path, timeout=300)
+        
+        # Return path successfully. Directory stays exists!
         return {"index": index, "video_path": temp_video_path, "status": "success"}
 
     except Exception as e:
         logging.error(f"Scene {index} failed: {traceback.format_exc()}")
         return {"index": index, "video_path": None, "status": "failed"}
-    finally:
-        if os.path.exists(temp_dir):
-            try: shutil.rmtree(temp_dir)
-            except: pass
 
 # -------------------------
-# STITCHING (SELF-HEALING)
+# STITCHING (SELF-HEALING + MIN DURATION)
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     request_id = str(uuid.uuid4())
@@ -386,21 +386,21 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
         
         for i, (video, audio) in enumerate(scene_pairs):
             try:
-                # Validate inputs
-                if not os.path.exists(video) or os.path.getsize(video) == 0:
+                # Sanity Checks
+                if not video or not os.path.exists(video):
                     logging.warning(f"Video missing for scene {i}, skipping.")
                     continue
-                if not os.path.exists(audio) or os.path.getsize(audio) == 0:
+                if not audio or not os.path.exists(audio):
                     logging.warning(f"Audio missing for scene {i}, skipping.")
                     continue
 
                 chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
                 audio_dur = get_media_duration(audio)
                 
-                # [FIX] Force Minimum Duration of 2 seconds to prevent FFMPEG crash on short clips
+                # [FIX] Force min duration 2s to prevent ffmpeg crash
                 target_dur = max(audio_dur, 2.0)
                 
-                # FFmpeg Command with Padding (apad) so audio doesn't cut out if we extended it
+                # FFmpeg: Loop video, Pad audio
                 cmd = [
                     "ffmpeg", "-y", 
                     "-stream_loop", "-1", "-i", video, 
@@ -409,20 +409,18 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                     "-map", "0:v", "-map", "1:a",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
                     "-c:a", "aac", 
-                    "-af", "apad", # Pad audio with silence if video is longer
+                    "-af", "apad", # Pad silence if audio is shorter than video
                     "-shortest", 
                     chunk_name
                 ]
-                
                 subprocess.run(cmd, check=True, capture_output=True)
                 chunk_paths.append(chunk_name)
                 
-            except subprocess.CalledProcessError as e:
-                logging.error(f"Failed to stitch chunk {i}: {e}. Skipping this scene.")
+            except Exception as e:
+                logging.error(f"Failed to stitch chunk {i}: {e}. Skipping.")
                 continue
 
         if not chunk_paths: 
-            logging.error("No chunks were successfully stitched.")
             return False
 
         with open(input_list_path, "w") as f:
@@ -617,7 +615,6 @@ def background_generate_video(self, form_data: dict):
         final_output_path = f"/tmp/final_render_{task_id}.mp4"
         temp_visual_path = f"/tmp/visual_base_{task_id}.mp4"
         
-        # [FIX] Don't crash task, return error state properly if stitching fails
         if not stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path):
              return {"status": "error", "message": "Video stitching failed. Please try again."}
 
@@ -639,11 +636,14 @@ def background_generate_video(self, form_data: dict):
         thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
         metadata = youtube_metadata_agent(full_script_text, keyword, form_data, blueprint)
 
-        # Cleanup
+        # Cleanup: Only clean up temp files at the very end
         try:
             if os.path.exists(temp_visual_path): os.remove(temp_visual_path)
             for v, a in final_pairs:
-                if os.path.exists(v): os.remove(v)
+                # Remove the actual scene folder to keep /tmp clean
+                if v and os.path.exists(v): 
+                    parent_dir = os.path.dirname(v)
+                    if "scene_" in parent_dir: shutil.rmtree(parent_dir)
         except: pass
 
         return {
@@ -656,5 +656,4 @@ def background_generate_video(self, form_data: dict):
 
     except Exception as e:
         logging.error(f"Task Failed: {traceback.format_exc()}")
-        # Return proper JSON error state instead of crashing Celery worker
         return {"status": "error", "message": str(e)}
