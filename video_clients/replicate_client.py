@@ -1,104 +1,87 @@
 import os
 import logging
 import replicate
+import time
 
-# -------------------------------------------------
-# Logging Setup
-# -------------------------------------------------
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 
-# -------------------------------------------------
-# MODEL CONFIGURATION
-# -------------------------------------------------
+# --- CLIENT INITIALIZATION ---
+if REPLICATE_API_TOKEN:
+    client = replicate.Client(api_token=REPLICATE_API_TOKEN)
+else:
+    client = None
+    logger.warning("⚠️ REPLICATE_API_TOKEN is missing.")
 
-# Model 1: Wan 2.1 (Video Generation)
-SCENE_MODEL_ID = "wan-video/wan-2.1-1.3b"
-
-# Model 2: SadTalker (Stable Version from lucataco)
-# Confirmed working and DOES NOT give 422 error.
-LIP_SYNC_MODEL_ID = (
-    "lucataco/sadtalker:85c698db7c0a66d5011435d0191bd32305a9c7499252a9041270252565697697"
-)
-
-# -------------------------------------------------
-# WAN 2.1 VIDEO GENERATOR
-# -------------------------------------------------
-def generate_video_scene_with_replicate(prompt: str, image_url: str = None, aspect: str = "16:9") -> str:
+# --- HELPER: SAFE RUNNER (Fixes 404 Errors) ---
+def run_replicate_safe(model_ref: str, input_data: dict) -> str:
     """
-    Generates a cinematic video scene using Wan 2.1.
-    Supports both text-to-video and image-to-video.
+    Runs a Replicate model safely.
+    - If it's an official model (no version hash needed), runs directly.
+    - If it's a community model, fetches the latest version first.
     """
+    if not client:
+        raise ConnectionError("Replicate Client not initialized.")
 
-    if not REPLICATE_API_TOKEN:
-        raise ConnectionError("REPLICATE_API_TOKEN is missing in environment variables.")
-
-    logger.info(f"🎬 Generating WAN 2.1 Video | Prompt: {prompt[:40]}... | Aspect: {aspect}")
-
+    # 1. Official Models (Do NOT fetch version, run directly)
+    official_models = ["black-forest-labs/flux-schnell", "wan-video/wan-2.1-1.3b"]
+    
     try:
-        payload = {
-            "prompt": prompt,
-            "negative_prompt": (
-                "distortion, deformed face, bad anatomy, low quality, flickering, watermark, text, cartoon"
-            ),
-            "aspect_ratio": aspect,
-        }
+        if model_ref in official_models:
+            logger.info(f"🚀 Running Official Model: {model_ref}")
+            output = client.run(model_ref, input=input_data)
+        else:
+            # 2. Community Models (Fetch Version ID)
+            if ":" not in model_ref:
+                model = client.models.get(model_ref)
+                version = model.versions.list()[0].id
+                model_ref = f"{model_ref}:{version}"
+            
+            logger.info(f"🚀 Running Community Model: {model_ref}")
+            output = client.run(model_ref, input=input_data)
 
-        # If user uploads an image for image-to-video
-        if image_url:
-            payload["image"] = image_url
-
-        output = replicate.run(SCENE_MODEL_ID, input=payload)
-
-        # Replicate may return: list[video_url] or just a string
-        if isinstance(output, list) and len(output):
-            return output[0]
+        # Normalize Output
+        if isinstance(output, list) and output:
+            return str(output[0])
+        elif isinstance(output, dict):
+            return output.get("url") or output.get("output") or str(output)
         return str(output)
 
     except Exception as e:
-        logger.error(f"🔴 WAN Video Generation Error: {e}")
+        logger.error(f"🔴 Replicate Error ({model_ref}): {e}")
         raise
 
+# --- 1. IMAGE GENERATION (FLUX) ---
+def generate_image_flux(prompt: str, aspect_ratio: str = "16:9") -> str:
+    return run_replicate_safe(
+        "black-forest-labs/flux-schnell",
+        {"prompt": prompt, "aspect_ratio": aspect_ratio, "output_format": "jpg"}
+    )
 
-# -------------------------------------------------
-# SADTALKER LIP SYNC GENERATOR
-# -------------------------------------------------
-def generate_lip_sync_with_replicate(image_url: str, audio_url: str) -> str:
-    """
-    Generates a speaking avatar using SadTalker.
-    Fully compatible with lucataco repo version.
-    """
+# --- 2. VIDEO GENERATION (WAN 2.1) ---
+def generate_video_wan(prompt: str, image_url: str = None, aspect_ratio: str = "16:9") -> str:
+    payload = {
+        "prompt": prompt,
+        "aspect_ratio": aspect_ratio,
+        "negative_prompt": "distortion, low quality, text, watermark"
+    }
+    if image_url:
+        payload["image"] = image_url  # Image-to-Video
+    
+    return run_replicate_safe("wan-video/wan-2.1-1.3b", payload)
 
-    if not REPLICATE_API_TOKEN:
-        raise ConnectionError("REPLICATE_API_TOKEN is missing in environment variables.")
-
-    logger.info("🗣️ Running SadTalker Lip Sync...")
-
-    try:
-        payload = {
-            "source_image": image_url,
+# --- 3. LIP SYNC (SADTALKER) ---
+def generate_lip_sync(face_url: str, audio_url: str) -> str:
+    return run_replicate_safe(
+        "lucataco/sadtalker",
+        {
+            "source_image": face_url,
             "driven_audio": audio_url,
-
-            # ---------- Motion & Stability Settings ----------
-            "still": True,                 # Prevents background shaking
-            "enhancer": "gfpgan",          # Face HD enhancer
-            "preprocess": "full",          # Full frame detection
-            "expression_scale": 1.1,       # Adds realistic emotional expression (FIX)
-
-            # ---------- Auto Blink & Auto Pose ----------
-            "ref_eyeblink": None,          # Auto-generate blinking
-            "ref_pose": None,              # Auto head motion
+            "still": True,
+            "enhancer": "gfpgan",
+            "expression_scale": 1.1
         }
-
-        output = replicate.run(LIP_SYNC_MODEL_ID, input=payload)
-
-        if isinstance(output, list) and len(output):
-            return output[0]
-        return str(output)
-
-    except Exception as e:
-        logger.error(f"🔴 SadTalker Lip Sync Error: {e}")
-        raise
-
+    )
