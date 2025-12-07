@@ -29,7 +29,6 @@ from openai import OpenAI
 import replicate
 
 # --- UTILS IMPORT SAFETY BLOCK ---
-# We try to import, but if it fails, we use local fallbacks to ensure the code never breaks.
 try:
     from utils.ffmpeg_utils import get_media_duration
 except ImportError:
@@ -183,7 +182,7 @@ def extract_json_list_from_text(text: str) -> Optional[list]:
     return None
 
 # -------------------------
-# [CRITICAL FIX] LOW-MEMORY VIDEO STITCHER
+# LOW-MEMORY VIDEO STITCHER
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     """
@@ -200,7 +199,6 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
     try:
         logging.info(f"Processing {len(scene_pairs)} pairs for Request ID: {request_id}")
 
-        # 1. Process chunks (Sync Video length to Audio length)
         for i, (video, audio) in enumerate(scene_pairs):
             chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
             
@@ -209,17 +207,15 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                 logging.warning(f"Audio duration is 0 for {audio}, skipping chunk.")
                 continue
 
-            # COMMAND OPTIMIZED FOR LOW MEMORY ENVIRONMENTS
-            # -preset ultrafast: Uses less CPU/RAM
-            # -crf 28: Compresses more to save buffer size
+            # COMMAND OPTIMIZED FOR LOW MEMORY
             cmd = [
                 "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
                 "-t", str(audio_dur), 
                 "-map", "0:v", "-map", "1:a",
                 "-c:v", "libx264", 
                 "-pix_fmt", "yuv420p", 
-                "-preset", "ultrafast",  # <--- CRITICAL FIX
-                "-crf", "28",            # <--- CRITICAL FIX
+                "-preset", "ultrafast", 
+                "-crf", "28", 
                 "-c:a", "aac", 
                 "-shortest",
                 chunk_name
@@ -228,13 +224,11 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
             subprocess.run(cmd, check=True, capture_output=True)
             chunk_paths.append(chunk_name)
 
-        # 2. Write the Concat List
         with open(input_list_path, "w") as f:
             for chunk in chunk_paths:
                 abs_path = os.path.abspath(chunk).replace("'", "'\\''")
                 f.write(f"file '{abs_path}'\n")
 
-        # 3. Concatenate Chunks
         logging.info("Concatenating chunks...")
         subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", 
@@ -395,70 +389,71 @@ def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
     return str(output[0]) if isinstance(output, (list, tuple)) else str(output)
 
 # -------------------------
-# Scene Processor 
+# [UPDATED] Scene Processor with SMART CINEMATIC LOGIC
 # -------------------------
 def process_single_scene(
     scene: dict, 
     index: int, 
     character_profile: str, 
-    audio_path: str = None,   # Pass audio for syncing
-    reference_img_url: str = None, # Pass master face for consistency
+    audio_path: str = None,
+    reference_img_url: str = None,
     aspect: str = "16:9"
 ) -> dict:
     """
-    Generates a scene video. 
-    1. Uses 'reference_img_url' if available (Consistency).
-    2. If audio exists, runs 'generate_lip_sync_with_replicate' (Talking Head).
-    3. If no audio, runs 'generate_video_scene_with_replicate' (Cinematic B-Roll).
+    Generates a scene video with Smart Logic:
+    - Wide/Drone/No-Dialogue -> Cinematic B-Roll (Wan 2.1)
+    - Close-up/Dialogue -> Lip-Sync (SadTalker)
     """
     try:
         # Rate Limit Buffer
         sleep_time = random.randint(5, 15)
         time.sleep(sleep_time)
 
-        # --- A. CHARACTER CONSISTENCY LOGIC ---
-        # If we have a Master Reference Image (generated once at start), use it!
-        # Otherwise, generate a fresh one (Only for Scene 0 or B-Roll).
+        # 1. Determine "Mode" (Talking vs B-Roll)
+        shot_type = scene.get("shot_type", "medium").lower()
+        has_dialogue = bool(scene.get("audio_narration") and len(scene.get("audio_narration")) > 2)
+        
+        # SMART LOGIC: If it's a wide/drone shot OR no dialogue, force B-Roll.
+        is_cinematic_shot = "wide" in shot_type or "drone" in shot_type or "establish" in shot_type or not has_dialogue
+
+        # 2. Prepare Reference Image (Consistency)
         keyframe_url = None
         
         if scene.get("image_url") and str(scene.get("image_url")).endswith(".mp4"):
-             # If user uploaded a video directly
+             # User uploaded video
              temp_path = f"/tmp/user_upload_{index}_{uuid.uuid4()}.mp4"
              download_to_file(scene.get("image_url"), temp_path)
              return {"index": index, "video_path": temp_path, "status": "success"}
 
         if scene.get("image_url"):
-            keyframe_url = scene.get("image_url") # User manual upload (per scene)
-        elif reference_img_url:
-            keyframe_url = reference_img_url # <--- USE THE CONSISTENT ACTOR FACE
+            keyframe_url = scene.get("image_url")
+        elif reference_img_url and not is_cinematic_shot:
+            # ONLY use the Master Face if we are doing a Close-up/Talking shot.
+            # If it's a drone shot of a city, we don't want a giant face.
+            keyframe_url = reference_img_url 
         else:
-            # Fallback: Only generate new face if we absolutely have to
+            # Generate a fresh image for B-Roll (e.g. Cityscape, Nature)
             visual_setting = scene.get("visual_prompt", "")
-            human_texture = "detailed skin pores, natural skin texture, 8k"
-            negative = " --no plastic, doll, 3d render, cartoon"
-            full_prompt = f"{character_profile}, {visual_setting}, {human_texture}, cinematic lighting {negative}"
+            full_prompt = f"{visual_setting}, cinematic lighting, 8k, photorealistic"
+            if not is_cinematic_shot: # If talking but no ref image, mention char
+                full_prompt = f"{character_profile}, {full_prompt}"
+            
             keyframe_url = generate_flux_image(full_prompt, aspect=aspect)
 
-        # --- B. SELECT GENERATION ENGINE (Lip-Sync vs Cinematic) ---
+        # 3. Generate Video
         video_url = None
         
-        # Check if this scene has dialogue AND we have audio
-        has_dialogue = bool(scene.get("audio_narration") and len(scene.get("audio_narration")) > 2)
-        
-        if has_dialogue and audio_path and generate_lip_sync_with_replicate:
-            # Upload local audio to cloud so Replicate can access it
+        # Branch 1: Lip Sync (Only if talking AND close-up/medium)
+        if not is_cinematic_shot and audio_path and generate_lip_sync_with_replicate:
             cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
-            
-            # CALL LIP-SYNC (SadTalker / Wav2Lip)
-            # This makes the "keyframe_url" face talk using "cloud_audio_url"
             video_url = generate_lip_sync_with_replicate(keyframe_url, cloud_audio_url)
             
+        # Branch 2: Cinematic B-Roll (Wan 2.1)
         else:
-            # NO Dialogue -> Use Cinematic Action (Wan 2.1 / Luma)
-            action = scene.get("action_prompt", "subtle movement") + f", camera:{scene.get('camera_angle','35mm')}"
+            action = scene.get("action_prompt", "cinematic movement") + f", camera:{scene.get('camera_angle','35mm')}"
             video_url = generate_video_scene_with_replicate(prompt=action, image_url=keyframe_url, aspect=aspect)
         
-        # 3. Download Result
+        # 4. Download Result
         temp_video_path = f"/tmp/scene_gen_{index}_{uuid.uuid4()}.mp4"
         download_to_file(video_url, temp_video_path)
         
@@ -494,7 +489,6 @@ def background_generate_video(self, form_data: dict):
         characters = storyboard.get("characters") or []
         uploaded_images = form_data.get("uploaded_images") or []
         if uploaded_images:
-             # Basic mapping of uploads to characters
              for i, url in enumerate(uploaded_images):
                  if i < len(characters): characters[i]["reference_image_url"] = url
                  else: characters.append({"name": f"Char {i}", "reference_image_url": url})
@@ -527,7 +521,6 @@ def background_generate_video(self, form_data: dict):
             voice_id = segments[i].get("voice_id") if i < len(segments) else "21m00Tcm4TlvDq8ikWAM"
             full_script_text += text + " "
 
-            # Generate local audio
             if generate_audio_for_scene:
                 audio_path = generate_audio_for_scene(text, voice_id)
             else:
@@ -579,7 +572,6 @@ def background_generate_video(self, form_data: dict):
                 else:
                     logging.warning(f"Scene {idx} video failed. Skipping.")
 
-            # Re-assemble in correct order
             for i in range(len(scenes)):
                 if i in results_map:
                     final_pairs.append(results_map[i])
@@ -590,28 +582,23 @@ def background_generate_video(self, form_data: dict):
         # 5. Stitching (SaaS Logic)
         update_status("Final Assembly (Audio-Video Sync)...")
         
-        # Prepare Music
         music_tone = blueprint.get("tone", "motivational")
         music_url = MUSIC_LIBRARY.get(music_tone, MUSIC_LIBRARY["default"])
         music_path = os.path.join(tempfile.gettempdir(), f"music_{uuid.uuid4()}.mp3")
         try:
             download_to_file(music_url, music_path)
         except:
-            music_path = None # Proceed without music if fail
+            music_path = None 
 
-        # Stitch
         final_output_path = f"/tmp/final_render_{task_id}.mp4"
         
-        # Step A: Stitch Scenes using LOCAL OPTIMIZED FUNCTION
         temp_visual_path = f"/tmp/visual_base_{task_id}.mp4"
         success = stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path)
         
         if not success:
             raise RuntimeError("Stitching failed.")
         
-        # Step B: Add Background Music (Ducking)
         if music_path:
-            # LOW MEMORY COMMAND
             cmd = [
                 "ffmpeg", "-y",
                 "-i", temp_visual_path,
@@ -624,7 +611,6 @@ def background_generate_video(self, form_data: dict):
             ]
             subprocess.run(cmd, check=True)
         else:
-            # No music, just rename
             shutil.move(temp_visual_path, final_output_path)
 
         # 6. Upload & Metadata
@@ -633,7 +619,6 @@ def background_generate_video(self, form_data: dict):
         thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
         metadata = youtube_metadata_agent(full_script_text, keyword, form_data, blueprint)
 
-        # Cleanup
         try:
             if music_path and os.path.exists(music_path): os.remove(music_path)
             if os.path.exists(temp_visual_path): os.remove(temp_visual_path)
