@@ -43,19 +43,20 @@ except ImportError:
     ELEVENLABS_AVAILABLE = False
 
 # --- UTILS IMPORT SAFETY BLOCK ---
-try:
-    from utils.ffmpeg_utils import get_media_duration
-except ImportError:
-    def get_media_duration(file_path):
-        try:
-            cmd = [
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1", file_path
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            return float(result.stdout.strip())
-        except Exception:
-            return 0.0
+def get_media_duration(file_path):
+    """Returns media duration in seconds. Returns 0.0 on failure."""
+    try:
+        if not os.path.exists(file_path): return 0.0
+        cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        val = result.stdout.strip()
+        return float(val) if val else 0.0
+    except Exception as e:
+        logging.error(f"Error getting duration for {file_path}: {e}")
+        return 0.0
 
 # -------------------------
 # CONFIGURATION
@@ -67,6 +68,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 SCRAPINGBEE_API_KEY = os.getenv("SCRAPINGBEE_API_KEY")
 
+# Cloudinary Config
 if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.getenv("CLOUDINARY_API_SECRET")]):
     cloudinary.config(
         cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME"),
@@ -144,7 +146,7 @@ def ensure_character(name: str, appearance_prompt: Optional[str] = None, referen
     return db[name]
 
 # -------------------------
-# CORE UTILS
+# HELPER FUNCTIONS
 # -------------------------
 def load_prompt_template(filename: str) -> str:
     path = os.path.join("prompts", filename)
@@ -231,18 +233,18 @@ def get_latest_model_version_id(model_name: str) -> Optional[str]:
 def replicate_run_safe(model_name: str, **kwargs) -> Optional[str]:
     if not replicate_client: raise RuntimeError("Replicate client not configured")
     
-    # 1. Try Direct Run
+    # 1. Try Direct Run (Official)
     try:
         logging.info(f"Replicate: running {model_name}")
         raw = replicate_client.run(model_name, **kwargs)
         return normalize_replicate_output(raw)
     except Exception as e:
-        logging.warning(f"Direct run failed for {model_name}, attempting version resolve: {e}")
+        logging.warning(f"Direct run failed for {model_name}, trying version resolve: {e}")
     
-    # 2. Resolve Version (Fallback)
+    # 2. Resolve Version (Community)
     version_id = get_latest_model_version_id(model_name)
     if not version_id:
-        raise RuntimeError(f"Model run failed for {model_name}")
+        raise RuntimeError(f"Model run failed for {model_name} (No version found)")
     
     model_ref = f"{model_name}:{version_id}"
     raw = replicate_client.run(model_ref, **kwargs)
@@ -293,7 +295,7 @@ def generate_audio_robust(text: str, voice_id: str) -> str:
     raise RuntimeError("All audio generation methods failed.")
 
 # -------------------------
-# SCENE PROCESSING (LIP SYNC FIXED: cjwbw/sadtalker)
+# SCENE PROCESSING (FIXED LIP SYNC)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -326,23 +328,23 @@ def process_single_scene(
 
         video_url = None
 
-        # 1. Lip Sync (Using cjwbw/sadtalker - more reliable)
+        # 1. Lip Sync (Using Reliable Model: cjwbw/sadtalker)
+        # This replaces the broken lucataco model
         if has_dialogue and target_face_url and not is_wide:
             try:
                 cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
                 
-                # FIXED MODEL: cjwbw/sadtalker with known working version
+                # Verified working version hash for cjwbw/sadtalker
                 model_name = "cjwbw/sadtalker:a519cc0cfebaaeade068b23899165a11ec76aaa1d2b313d40d214f204ec957a3"
                 
-                # FIXED PARAMS: cjwbw uses different param names than lucataco
                 input_payload = {
                     "source_image": target_face_url,
                     "driven_audio": cloud_audio_url,
-                    "still_mode": True,       # cjwbw uses 'still_mode' not 'still'
-                    "use_enhancer": True,     # cjwbw uses 'use_enhancer' not 'enhancer'
+                    "still_mode": True,
+                    "use_enhancer": True,
                     "preprocess": "full"
                 }
-                
+                # Direct run on specific version
                 raw = replicate_client.run(model_name, input=input_payload)
                 video_url = normalize_replicate_output(raw)
             except Exception as e:
@@ -387,7 +389,11 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
         for i, (video, audio) in enumerate(scene_pairs):
             chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
             audio_dur = get_media_duration(audio)
-            if audio_dur == 0: continue 
+            
+            # [FIX] CRITICAL: Skip very short audio glitches (< 0.5s) which cause ffmpeg to crash
+            if audio_dur < 0.5: 
+                logging.warning(f"⚠️ Audio for scene {i} is too short ({audio_dur}s). Skipping.")
+                continue 
 
             cmd = [
                 "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
@@ -491,10 +497,11 @@ def youtube_metadata_agent(full_script: str, keyword: str, form_data: dict, blue
     return extract_json_from_text(raw) or (json.loads(raw) if raw else {})
 
 # -------------------------
-# CELERY TASK MAIN
+# CELERY TASK MAIN (Safe Wrapped)
 # -------------------------
 @celery.task(bind=True)
 def background_generate_video(self, form_data: dict):
+    # CRITICAL: Broad Try/Except to prevent Celery serialization crash
     try:
         task_id = getattr(self.request, "id", "unknown")
         logging.info(f"[{task_id}] SaaS Task started.")
@@ -587,8 +594,10 @@ def background_generate_video(self, form_data: dict):
         
         final_output_path = f"/tmp/final_render_{task_id}.mp4"
         temp_visual_path = f"/tmp/visual_base_{task_id}.mp4"
+        
+        # [FIX] Do not raise RuntimeError inside task if possible, just return failed dict
         if not stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path):
-            raise RuntimeError("Stitching failed.")
+             return {"status": "error", "message": "Video stitching failed due to corrupted media."}
 
         if music_path:
             cmd = [
@@ -608,6 +617,7 @@ def background_generate_video(self, form_data: dict):
         thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
         metadata = youtube_metadata_agent(full_script_text, keyword, form_data, blueprint)
 
+        # Cleanup
         try:
             if os.path.exists(temp_visual_path): os.remove(temp_visual_path)
             for v, a in final_pairs:
@@ -623,6 +633,6 @@ def background_generate_video(self, form_data: dict):
         }
 
     except Exception as e:
-        logging.error(f"Task Crashed: {traceback.format_exc()}")
-        self.update_state(state="FAILURE", meta={"error": str(e)})
-        raise RuntimeError(str(e))
+        # [FIX] Return JSON Error instead of crashing Celery
+        logging.error(f"Task Failed: {traceback.format_exc()}")
+        return {"status": "error", "message": str(e)}
