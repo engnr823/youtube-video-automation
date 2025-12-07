@@ -67,6 +67,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 SCRAPINGBEE_API_KEY = os.getenv("SCRAPINGBEE_API_KEY")
 
+# Cloudinary Config
 if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.getenv("CLOUDINARY_API_SECRET")]):
     cloudinary.config(
         cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME"),
@@ -242,6 +243,7 @@ def replicate_run_safe(model_name: str, **kwargs) -> Optional[str]:
     # 2. Resolve Version (Fallback)
     version_id = get_latest_model_version_id(model_name)
     if not version_id:
+        # If no version found and direct run failed, re-raise original error
         raise RuntimeError(f"Model run failed for {model_name}")
     
     model_ref = f"{model_name}:{version_id}"
@@ -293,7 +295,7 @@ def generate_audio_robust(text: str, voice_id: str) -> str:
     raise RuntimeError("All audio generation methods failed.")
 
 # -------------------------
-# SCENE PROCESSING (LIP SYNC FIXED: cjwbw/sadtalker)
+# SCENE PROCESSING (FIXED LIP SYNC)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -326,23 +328,19 @@ def process_single_scene(
 
         video_url = None
 
-        # 1. Lip Sync (Using cjwbw/sadtalker - more reliable)
+        # 1. Lip Sync (SadTalker) - Fixed Model Hash
         if has_dialogue and target_face_url and not is_wide:
             try:
                 cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
+                # FIXED: Added exact version hash for SadTalker
+                model_name = "lucataco/sadtalker:85c698db7c0a66d5011435d0191bd32305a9c7499252a9041270252565697697"
                 
-                # FIXED MODEL: cjwbw/sadtalker with known working version
-                model_name = "cjwbw/sadtalker:a519cc0cfebaaeade068b23899165a11ec76aaa1d2b313d40d214f204ec957a3"
-                
-                # FIXED PARAMS: cjwbw uses different param names than lucataco
                 input_payload = {
                     "source_image": target_face_url,
                     "driven_audio": cloud_audio_url,
-                    "still_mode": True,       # cjwbw uses 'still_mode' not 'still'
-                    "use_enhancer": True,     # cjwbw uses 'use_enhancer' not 'enhancer'
-                    "preprocess": "full"
+                    "still": True, "enhancer": "gfpgan", "expression_scale": 1.1
                 }
-                
+                # Use direct run via client for pinned version
                 raw = replicate_client.run(model_name, input=input_payload)
                 video_url = normalize_replicate_output(raw)
             except Exception as e:
@@ -608,6 +606,7 @@ def background_generate_video(self, form_data: dict):
         thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
         metadata = youtube_metadata_agent(full_script_text, keyword, form_data, blueprint)
 
+        # Cleanup
         try:
             if os.path.exists(temp_visual_path): os.remove(temp_visual_path)
             for v, a in final_pairs:
