@@ -146,7 +146,7 @@ def ensure_character(name: str, appearance_prompt: Optional[str] = None, referen
     return db[name]
 
 # -------------------------
-# HELPER FUNCTIONS
+# CORE UTILS
 # -------------------------
 def load_prompt_template(filename: str) -> str:
     path = os.path.join("prompts", filename)
@@ -233,7 +233,7 @@ def get_latest_model_version_id(model_name: str) -> Optional[str]:
 def replicate_run_safe(model_name: str, **kwargs) -> Optional[str]:
     if not replicate_client: raise RuntimeError("Replicate client not configured")
     
-    # 1. Try Direct Run (Official)
+    # 1. Try Direct Run
     try:
         logging.info(f"Replicate: running {model_name}")
         raw = replicate_client.run(model_name, **kwargs)
@@ -241,7 +241,7 @@ def replicate_run_safe(model_name: str, **kwargs) -> Optional[str]:
     except Exception as e:
         logging.warning(f"Direct run failed for {model_name}, trying version resolve: {e}")
     
-    # 2. Resolve Version (Community)
+    # 2. Resolve Version (Fallback)
     version_id = get_latest_model_version_id(model_name)
     if not version_id:
         raise RuntimeError(f"Model run failed for {model_name} (No version found)")
@@ -295,7 +295,7 @@ def generate_audio_robust(text: str, voice_id: str) -> str:
     raise RuntimeError("All audio generation methods failed.")
 
 # -------------------------
-# SCENE PROCESSING (FIXED LIP SYNC)
+# SCENE PROCESSING
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -329,14 +329,11 @@ def process_single_scene(
         video_url = None
 
         # 1. Lip Sync (Using Reliable Model: cjwbw/sadtalker)
-        # This replaces the broken lucataco model
         if has_dialogue and target_face_url and not is_wide:
             try:
                 cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
                 
-                # Verified working version hash for cjwbw/sadtalker
                 model_name = "cjwbw/sadtalker:a519cc0cfebaaeade068b23899165a11ec76aaa1d2b313d40d214f204ec957a3"
-                
                 input_payload = {
                     "source_image": target_face_url,
                     "driven_audio": cloud_audio_url,
@@ -344,7 +341,6 @@ def process_single_scene(
                     "use_enhancer": True,
                     "preprocess": "full"
                 }
-                # Direct run on specific version
                 raw = replicate_client.run(model_name, input=input_payload)
                 video_url = normalize_replicate_output(raw)
             except Exception as e:
@@ -376,7 +372,7 @@ def process_single_scene(
             except: pass
 
 # -------------------------
-# STITCHING & AGENTS
+# STITCHING (SELF-HEALING)
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     request_id = str(uuid.uuid4())
@@ -384,27 +380,50 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
     os.makedirs(temp_dir, exist_ok=True)
     input_list_path = os.path.join(temp_dir, "inputs.txt")
     chunk_paths = []
+    
     try:
         logging.info(f"Stitching {len(scene_pairs)} pairs")
+        
         for i, (video, audio) in enumerate(scene_pairs):
-            chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
-            audio_dur = get_media_duration(audio)
-            
-            # [FIX] CRITICAL: Skip very short audio glitches (< 0.5s) which cause ffmpeg to crash
-            if audio_dur < 0.5: 
-                logging.warning(f"⚠️ Audio for scene {i} is too short ({audio_dur}s). Skipping.")
-                continue 
+            try:
+                # Validate inputs
+                if not os.path.exists(video) or os.path.getsize(video) == 0:
+                    logging.warning(f"Video missing for scene {i}, skipping.")
+                    continue
+                if not os.path.exists(audio) or os.path.getsize(audio) == 0:
+                    logging.warning(f"Audio missing for scene {i}, skipping.")
+                    continue
 
-            cmd = [
-                "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
-                "-t", str(audio_dur), "-map", "0:v", "-map", "1:a",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
-                "-c:a", "aac", "-shortest", chunk_name
-            ]
-            subprocess.run(cmd, check=True, capture_output=True)
-            chunk_paths.append(chunk_name)
+                chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
+                audio_dur = get_media_duration(audio)
+                
+                # [FIX] Force Minimum Duration of 2 seconds to prevent FFMPEG crash on short clips
+                target_dur = max(audio_dur, 2.0)
+                
+                # FFmpeg Command with Padding (apad) so audio doesn't cut out if we extended it
+                cmd = [
+                    "ffmpeg", "-y", 
+                    "-stream_loop", "-1", "-i", video, 
+                    "-i", audio,
+                    "-t", str(target_dur), 
+                    "-map", "0:v", "-map", "1:a",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
+                    "-c:a", "aac", 
+                    "-af", "apad", # Pad audio with silence if video is longer
+                    "-shortest", 
+                    chunk_name
+                ]
+                
+                subprocess.run(cmd, check=True, capture_output=True)
+                chunk_paths.append(chunk_name)
+                
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Failed to stitch chunk {i}: {e}. Skipping this scene.")
+                continue
 
-        if not chunk_paths: return False
+        if not chunk_paths: 
+            logging.error("No chunks were successfully stitched.")
+            return False
 
         with open(input_list_path, "w") as f:
             for chunk in chunk_paths:
@@ -416,12 +435,16 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
             "-i", input_list_path, "-c", "copy", output_path
         ], check=True, capture_output=True)
         return True
+
     except Exception as e:
         logging.error(f"Stitching error: {e}")
         return False
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
+# -------------------------
+# AGENTS
+# -------------------------
 def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: bool = False) -> str:
     if not openai_client: raise RuntimeError("OpenAI client not configured")
     try:
@@ -501,7 +524,6 @@ def youtube_metadata_agent(full_script: str, keyword: str, form_data: dict, blue
 # -------------------------
 @celery.task(bind=True)
 def background_generate_video(self, form_data: dict):
-    # CRITICAL: Broad Try/Except to prevent Celery serialization crash
     try:
         task_id = getattr(self.request, "id", "unknown")
         logging.info(f"[{task_id}] SaaS Task started.")
@@ -595,9 +617,9 @@ def background_generate_video(self, form_data: dict):
         final_output_path = f"/tmp/final_render_{task_id}.mp4"
         temp_visual_path = f"/tmp/visual_base_{task_id}.mp4"
         
-        # [FIX] Do not raise RuntimeError inside task if possible, just return failed dict
+        # [FIX] Don't crash task, return error state properly if stitching fails
         if not stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path):
-             return {"status": "error", "message": "Video stitching failed due to corrupted media."}
+             return {"status": "error", "message": "Video stitching failed. Please try again."}
 
         if music_path:
             cmd = [
@@ -633,6 +655,6 @@ def background_generate_video(self, form_data: dict):
         }
 
     except Exception as e:
-        # [FIX] Return JSON Error instead of crashing Celery
         logging.error(f"Task Failed: {traceback.format_exc()}")
+        # Return proper JSON error state instead of crashing Celery worker
         return {"status": "error", "message": str(e)}
