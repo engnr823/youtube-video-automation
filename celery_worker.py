@@ -182,12 +182,12 @@ def extract_json_list_from_text(text: str) -> Optional[list]:
     return None
 
 # -------------------------
-# LOW-MEMORY VIDEO STITCHER
+# [CRITICAL FIX] LOW-MEMORY RESIZING VIDEO STITCHER
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     """
     Local optimized version of stitching to prevent Server Crashes (SIGKILL).
-    Uses 'ultrafast' preset and 'crf 28' to minimize RAM usage.
+    Uses 'ultrafast' preset, 'crf 28', and RESIZES video to 720p/1080p to fit in RAM.
     """
     request_id = str(uuid.uuid4())
     temp_dir = os.path.join("/tmp", f"render_{request_id}")
@@ -207,13 +207,15 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                 logging.warning(f"Audio duration is 0 for {audio}, skipping chunk.")
                 continue
 
-            # COMMAND OPTIMIZED FOR LOW MEMORY
+            # [FIX] Added scale filter to force reasonable resolution (Max width 720px)
+            # This prevents 4K source images from blowing up the server memory.
             cmd = [
                 "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
                 "-t", str(audio_dur), 
                 "-map", "0:v", "-map", "1:a",
                 "-c:v", "libx264", 
-                "-pix_fmt", "yuv420p", 
+                "-pix_fmt", "yuv420p",
+                "-vf", "scale='min(720,iw)':-2", # <--- FORCE RESIZE TO HD (Saves 80% RAM)
                 "-preset", "ultrafast", 
                 "-crf", "28", 
                 "-c:a", "aac", 
@@ -603,13 +605,14 @@ def background_generate_video(self, form_data: dict):
             raise RuntimeError("Stitching failed.")
         
         if music_path:
+            # [CRITICAL FIX] Added scaling here too
             cmd = [
                 "ffmpeg", "-y",
                 "-i", temp_visual_path,
                 "-stream_loop", "-1", "-i", music_path,
                 "-filter_complex", "[1:a]volume=0.15[bg];[0:a][bg]amix=inputs=2:duration=first[outa]",
                 "-map", "0:v", "-map", "[outa]",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-c:v", "libx264", "-vf", "scale='min(720,iw)':-2", "-preset", "ultrafast", "-crf", "28",
                 "-c:a", "aac", "-shortest",
                 final_output_path
             ]
