@@ -34,11 +34,8 @@ except ImportError:
 from openai import OpenAI
 
 # --- ELEVENLABS SAFE IMPORT ---
-# We wrap this to ensure the worker NEVER crashes on startup if this library is missing
 try:
-    from video_clients.elevenlabs_client import (
-        generate_audio_for_scene
-    )
+    from video_clients.elevenlabs_client import generate_audio_for_scene
     ELEVENLABS_AVAILABLE = True
 except ImportError:
     logging.warning("⚠️ ElevenLabs client not found. Audio generation will fallback to OpenAI.")
@@ -49,7 +46,6 @@ except ImportError:
 try:
     from utils.ffmpeg_utils import get_media_duration
 except ImportError:
-    # Internal Fallback if utils missing
     def get_media_duration(file_path):
         try:
             cmd = [
@@ -58,8 +54,7 @@ except ImportError:
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             return float(result.stdout.strip())
-        except Exception as e:
-            logging.error(f"Error getting duration for {file_path}: {e}")
+        except Exception:
             return 0.0
 
 # -------------------------
@@ -80,8 +75,6 @@ if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.
         api_secret=os.environ.get("CLOUDINARY_API_SECRET"),
         secure=True
     )
-else:
-    logging.warning("⚠️ Cloudinary not fully configured; uploads will fail.")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -89,10 +82,6 @@ if replicate and REPLICATE_API_TOKEN:
     replicate_client = replicate.Client(api_token=REPLICATE_API_TOKEN)
 else:
     replicate_client = None
-    if not replicate:
-        logging.warning("⚠️ Replicate package not installed.")
-    elif not REPLICATE_API_TOKEN:
-        logging.warning("⚠️ REPLICATE_API_TOKEN not set.")
 
 # -------------------------
 # ROYALTY-FREE MUSIC LIBRARY
@@ -210,7 +199,7 @@ def extract_json_list_from_text(text: str) -> Optional[list]:
     return None
 
 # -------------------------
-# REPLICATE SAFE RUNNER (Fixed 404 & Version Errors)
+# REPLICATE SAFE RUNNER
 # -------------------------
 def normalize_replicate_output(raw):
     try:
@@ -227,7 +216,7 @@ def normalize_replicate_output(raw):
     except Exception: return str(raw)
 
 def get_latest_model_version_id(model_name: str) -> Optional[str]:
-    # CRITICAL FIX: Skip version check for official models to avoid 404
+    # Skip version check for models we know have issues or are official
     if "flux" in model_name or "wan-video" in model_name or "sadtalker" in model_name:
         return None
     if not replicate_client: raise RuntimeError("Replicate client not configured")
@@ -240,30 +229,29 @@ def get_latest_model_version_id(model_name: str) -> Optional[str]:
         logging.warning(f"Unable to fetch versions for {model_name}: {e}")
         return None
 
-def replicate_run_safe(model_name: str, version: Optional[str] = None, **kwargs) -> Optional[str]:
-    """Runs Replicate models safely, handling official vs community models."""
+def replicate_run_safe(model_name: str, **kwargs) -> Optional[str]:
     if not replicate_client: raise RuntimeError("Replicate client not configured")
     
-    # 1. Try Direct Run (New API / Official Models)
+    # 1. Try Direct Run
     try:
         logging.info(f"Replicate: running {model_name}")
         raw = replicate_client.run(model_name, **kwargs)
         return normalize_replicate_output(raw)
     except Exception as e:
-        logging.warning(f"Direct run failed for {model_name}, retrying with version resolve: {e}")
+        logging.warning(f"Direct run failed for {model_name}, attempting version resolve: {e}")
     
-    # 2. Resolve Version (Old API / Community Models)
+    # 2. Resolve Version (Fallback)
     version_id = get_latest_model_version_id(model_name)
     if not version_id:
-        if "flux" in model_name: pass # Official models might fail list versions, that's ok
-        else: raise RuntimeError(f"No versions found for {model_name}")
+        # If no version found and direct run failed, re-raise original error
+        raise RuntimeError(f"Model run failed for {model_name}")
     
-    model_ref = f"{model_name}:{version_id}" if version_id else model_name
+    model_ref = f"{model_name}:{version_id}"
     raw = replicate_client.run(model_ref, **kwargs)
     return normalize_replicate_output(raw)
 
 # -------------------------
-# AI GENERATORS (Flux, Audio, etc.)
+# AI GENERATORS
 # -------------------------
 def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
     model_name = "black-forest-labs/flux-schnell"
@@ -275,12 +263,7 @@ def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
     raise RuntimeError("Flux image generation failed")
 
 def generate_audio_robust(text: str, voice_id: str) -> str:
-    """
-    CRITICAL: Smart fallback. 
-    1. Try ElevenLabs.
-    2. If fails/missing, use OpenAI.
-    """
-    # 1. Try ElevenLabs
+    # 1. ElevenLabs
     if ELEVENLABS_AVAILABLE and generate_audio_for_scene:
         try:
             res = generate_audio_for_scene(text, voice_id)
@@ -289,19 +272,17 @@ def generate_audio_robust(text: str, voice_id: str) -> str:
         except Exception as e:
             logging.warning(f"⚠️ ElevenLabs failed: {e}. Switching to OpenAI.")
 
-    # 2. Fallback to OpenAI
+    # 2. OpenAI
     if openai_client:
         try:
             logging.info("🎙️ Using OpenAI TTS Fallback...")
             safe_id = str(uuid.uuid4())
             output_path = os.path.join(tempfile.gettempdir(), f"openai_audio_{safe_id}.mp3")
             
-            # Simple Voice Mapping
             v_lower = (voice_id or "").lower()
             openai_voice = "alloy"
             if "male" in v_lower: openai_voice = "onyx"
             elif "female" in v_lower: openai_voice = "nova"
-            elif "intense" in v_lower: openai_voice = "fable"
 
             response = openai_client.audio.speech.create(
                 model="tts-1", voice=openai_voice, input=text
@@ -311,10 +292,10 @@ def generate_audio_robust(text: str, voice_id: str) -> str:
         except Exception as e:
             logging.error(f"OpenAI TTS failed: {e}")
 
-    raise RuntimeError("All audio generation methods (ElevenLabs & OpenAI) failed.")
+    raise RuntimeError("All audio generation methods failed.")
 
 # -------------------------
-# SCENE PROCESSING
+# SCENE PROCESSING (FIXED LIP SYNC)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -347,27 +328,25 @@ def process_single_scene(
 
         video_url = None
 
-        # 1. User Uploads
-        if scene.get("image_url") and str(scene.get("image_url")).endswith(".mp4"):
-            temp_path = os.path.join(temp_dir, f"user_upload_{index}.mp4")
-            download_to_file(scene.get("image_url"), temp_path)
-            return {"index": index, "video_path": temp_path, "status": "success"}
-
-        # 2. Lip Sync (SadTalker) - Needs Dialogue + Face + Not Wide Shot
+        # 1. Lip Sync (SadTalker) - Fixed Model Hash
         if has_dialogue and target_face_url and not is_wide:
             try:
                 cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
-                model_name = "lucataco/sadtalker"
+                # FIXED: Added exact version hash for SadTalker
+                model_name = "lucataco/sadtalker:85c698db7c0a66d5011435d0191bd32305a9c7499252a9041270252565697697"
+                
                 input_payload = {
                     "source_image": target_face_url,
                     "driven_audio": cloud_audio_url,
                     "still": True, "enhancer": "gfpgan", "expression_scale": 1.1
                 }
-                video_url = replicate_run_safe(model_name, input=input_payload)
+                # Use direct run via client for pinned version
+                raw = replicate_client.run(model_name, input=input_payload)
+                video_url = normalize_replicate_output(raw)
             except Exception as e:
                 logging.error(f"Lip-sync failed: {e}")
 
-        # 3. Cinematic (Wan Video) - Fallback or Primary
+        # 2. Cinematic (Wan Video)
         if not video_url:
             action = f"{scene.get('action_prompt','cinematic movement')}, camera:{scene.get('camera_angle','35mm')}"
             try:
@@ -421,8 +400,8 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
 
         with open(input_list_path, "w") as f:
             for chunk in chunk_paths:
-                abs_path = os.path.abspath(chunk).replace("'", "'\\''")
-                f.write(f"file '{abs_path}'\n")
+                safe_path = os.path.abspath(chunk).replace("'", "'\\''")
+                f.write(f"file '{safe_path}'\n")
 
         subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
@@ -450,13 +429,11 @@ def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: 
         return "{}" if is_json else ""
 
 def scrape_youtube_videos(keyword: str, provider: str = "scrapingbee") -> List[dict]:
-    # Restored scraping logic
     if provider == "scrapingbee" and SCRAPINGBEE_API_KEY:
         try:
             url = f"https://www.youtube.com/results?search_query={requests.utils.quote(keyword)}"
             params = {"api_key": SCRAPINGBEE_API_KEY, "url": url, "render_js": "false"}
             requests.get("https://app.scrapingbee.com/api/v1/", params=params, timeout=20)
-            # Mock parse for stability
             return [{"title": f"Viral {keyword}", "views": "1M"}] 
         except: pass
     return []
@@ -512,11 +489,10 @@ def youtube_metadata_agent(full_script: str, keyword: str, form_data: dict, blue
     return extract_json_from_text(raw) or (json.loads(raw) if raw else {})
 
 # -------------------------
-# CELERY TASK MAIN (Safe Wrapped)
+# CELERY TASK MAIN
 # -------------------------
 @celery.task(bind=True)
 def background_generate_video(self, form_data: dict):
-    # CRITICAL: Broad Try/Except to prevent Celery serialization crash
     try:
         task_id = getattr(self.request, "id", "unknown")
         logging.info(f"[{task_id}] SaaS Task started.")
@@ -548,7 +524,7 @@ def background_generate_video(self, form_data: dict):
         aspect = "9:16" if form_data.get("video_type") == "reel" else "16:9"
         for char in characters:
             name = char.get("name", "Unknown")
-            ensure_character(name) # Persist
+            ensure_character(name) 
             if name not in character_faces:
                 desc = char.get("appearance_prompt") or f"Cinematic portrait of {name}"
                 try:
@@ -646,7 +622,6 @@ def background_generate_video(self, form_data: dict):
         }
 
     except Exception as e:
-        # Catch-all to prevent Celery crash
         logging.error(f"Task Crashed: {traceback.format_exc()}")
         self.update_state(state="FAILURE", meta={"error": str(e)})
         raise RuntimeError(str(e))
