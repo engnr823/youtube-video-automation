@@ -27,11 +27,13 @@ from celery_init import celery
 # AI Clients
 from openai import OpenAI
 import replicate
-# Import VoiceSettings to fix nasal voice issues
+
+# --- VOICE SETTINGS SAFE IMPORT ---
 try:
     from elevenlabs import VoiceSettings
 except ImportError:
     VoiceSettings = None
+    logging.warning("⚠️ ElevenLabs VoiceSettings not found. Using default voice stability.")
 
 # --- UTILS IMPORT SAFETY BLOCK ---
 try:
@@ -403,7 +405,7 @@ def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
     return str(output[0]) if isinstance(output, (list, tuple)) else str(output)
 
 # -------------------------
-# [CRITICAL] SMART DIRECTOR LOGIC (Scenery vs Talking)
+# [ENHANCED] Scene Processor with "Natural Movement" Logic
 # -------------------------
 def process_single_scene(
     scene: dict, 
@@ -414,7 +416,9 @@ def process_single_scene(
     aspect: str = "16:9"
 ) -> dict:
     """
-    Decides between Lip-Sync (Close-up) and Cinematic B-Roll (Wide).
+    Generates a scene video with Smart Logic:
+    - Wide/Drone/No-Dialogue -> Cinematic B-Roll (Wan 2.1)
+    - Close-up/Dialogue -> Natural Lip-Sync (SadTalker with Motion)
     """
     try:
         # Rate Limit Buffer
@@ -425,14 +429,13 @@ def process_single_scene(
         shot_type = scene.get("shot_type", "medium").lower()
         has_dialogue = bool(scene.get("audio_narration") and len(scene.get("audio_narration")) > 2)
         
-        # LOGIC: Wide shot = Cinematic. No dialogue = Cinematic.
+        # SMART LOGIC: If it's a wide/drone shot OR no dialogue, force B-Roll.
         is_cinematic_shot = "wide" in shot_type or "drone" in shot_type or "establish" in shot_type or not has_dialogue
 
         # 2. Prepare Base Image
         keyframe_url = None
         
         if scene.get("image_url") and str(scene.get("image_url")).endswith(".mp4"):
-             # User uploaded video
              temp_path = f"/tmp/user_upload_{index}_{uuid.uuid4()}.mp4"
              download_to_file(scene.get("image_url"), temp_path)
              return {"index": index, "video_path": temp_path, "status": "success"}
@@ -440,10 +443,8 @@ def process_single_scene(
         if scene.get("image_url"):
             keyframe_url = scene.get("image_url")
         elif reference_img_url and not is_cinematic_shot:
-            # Only use Consistent Face if it's a Close-Up
             keyframe_url = reference_img_url 
         else:
-            # Generate new scenery for B-Roll
             visual_setting = scene.get("visual_prompt", "")
             full_prompt = f"{visual_setting}, cinematic lighting, 8k, photorealistic"
             if not is_cinematic_shot: 
@@ -454,19 +455,33 @@ def process_single_scene(
         # 3. Generate Video
         video_url = None
         
-        # Branch 1: Lip Sync (Talking Head)
         if not is_cinematic_shot and audio_path and generate_lip_sync_with_replicate:
             cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
-            video_url = generate_lip_sync_with_replicate(keyframe_url, cloud_audio_url)
             
-        # Branch 2: Cinematic B-Roll (Wan 2.1)
+            # [FIX] Added Motion Parameters to make head move naturally
+            video_url = replicate.run(
+                "cjwbw/sadtalker:a519cc0cf9fb78f3f881f21427d74421b83526ee37775949d0739b6727289043",
+                input={
+                    "source_image": keyframe_url,
+                    "driven_audio": cloud_audio_url,
+                    "still": True,             # Keep True to prevent background distortion
+                    "enhancer": "gfpgan",      # Sharpen the face
+                    "preprocess": "full",      # Use full frame
+                    "expression_scale": 1.1,   # Add facial expression
+                    "ref_eyeblink": None,      # Let AI generate blinking
+                    "ref_pose": None           # Let AI generate head movement
+                }
+            )
+            if isinstance(video_url, list): video_url = video_url[0]
+            
         else:
+            # Cinematic B-Roll (Wan 2.1)
             action = scene.get("action_prompt", "cinematic movement") + f", camera:{scene.get('camera_angle','35mm')}"
             video_url = generate_video_scene_with_replicate(prompt=action, image_url=keyframe_url, aspect=aspect)
         
         # 4. Download Result
         temp_video_path = f"/tmp/scene_gen_{index}_{uuid.uuid4()}.mp4"
-        download_to_file(video_url, temp_video_path)
+        download_to_file(str(video_url), temp_video_path)
         
         return {"index": index, "video_path": temp_video_path, "status": "success"}
 
