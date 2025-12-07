@@ -4,81 +4,127 @@ import logging
 import tempfile
 from typing import Optional, List, Dict
 from elevenlabs import ElevenLabs, VoiceSettings
+from time import sleep
 
-# Configure logging
+# -----------------------------
+# Logging Configuration
+# -----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Client Initialization ---
+# -----------------------------
+# ElevenLabs Client Initialization
+# -----------------------------
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 if not ELEVENLABS_API_KEY:
-    logger.warning("🔴 WARNING: ELEVENLABS_API_KEY is not set. Voice generation will fail.")
+    logger.warning("🔴 ELEVENLABS_API_KEY is not set. Voice generation will fail.")
     client = None
 else:
     client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
-def generate_audio_for_scene(text: str, voice_id: str) -> Optional[str]:
+# -----------------------------
+# Audio Generation Function
+# -----------------------------
+def generate_audio_for_scene(text: str, voice_id: Optional[str] = None, retries: int = 2) -> Optional[Dict[str, str]]:
     """
-    Generates audio for a single scene, saves it locally, and returns the path.
-    Includes 'Nasal Voice Fix' settings.
+    Generates audio for a single scene and returns a dict containing:
+        - path: local audio file path
+        - voice_id: the voice used
+        - text: original text
+
+    Retries are handled for transient API errors.
     """
     if not client:
-        logger.error("ElevenLabs client is not initialized.")
+        logger.error("ElevenLabs client not initialized. Cannot generate audio.")
         return None
 
-    # Fallback if voice_id is missing or empty
+    # Default voice if none provided
     if not voice_id:
-        voice_id = "pqHfZKP75CvOlQylNhV4" # Default to 'Bill' (Deep Male)
+        voice_id = "pqHfZKP75CvOlQylNhV4"  # Default 'Bill' Deep Male
 
-    try:
-        # Generate a unique filename in /tmp
-        safe_id = str(uuid.uuid4())
-        output_path = os.path.join(tempfile.gettempdir(), f"scene_audio_{safe_id}.mp3")
+    attempt = 0
+    while attempt <= retries:
+        try:
+            safe_id = str(uuid.uuid4())
+            output_path = os.path.join(tempfile.gettempdir(), f"scene_audio_{safe_id}.mp3")
+            logger.info(f"🎙️ Generating audio for voice_id={voice_id}, attempt {attempt + 1}...")
 
-        logger.info(f"🎙️ Generating audio for voice: {voice_id}...")
-
-        # [CRITICAL FIX] Settings for Natural Urdu/Hindi (Removes Robotic/Nasal tone)
-        # stability=0.4: Allows more emotion and natural accent fluctuation
-        # similarity_boost=0.5: Keeps the voice recognizable but not rigid
-        audio_stream = client.text_to_speech.convert(
-            text=text,
-            voice_id=voice_id,
-            model_id="eleven_multilingual_v2",
-            output_format="mp3_44100_128",
-            voice_settings=VoiceSettings(
-                stability=0.4, 
-                similarity_boost=0.5,
-                style=0.0,
-                use_speaker_boost=True
+            audio_stream = client.text_to_speech.convert(
+                text=text,
+                voice_id=voice_id,
+                model_id="eleven_multilingual_v2",
+                output_format="mp3_44100_128",
+                voice_settings=VoiceSettings(
+                    stability=0.4,
+                    similarity_boost=0.5,
+                    style=0.0,
+                    use_speaker_boost=True
+                )
             )
-        )
 
-        # Write stream to file
-        with open(output_path, "wb") as f:
-            for chunk in audio_stream:
-                if chunk:
-                    f.write(chunk)
-        
-        logger.info(f"✅ Audio generated successfully: {output_path}")
-        return output_path
+            # Write to file
+            with open(output_path, "wb") as f:
+                for chunk in audio_stream:
+                    if chunk:
+                        f.write(chunk)
 
-    except Exception as e:
-        logger.error(f"🔴 ElevenLabs Generation Failed: {e}")
-        # Optional: Add retry logic here with a fallback voice if needed
-        return None
+            logger.info(f"✅ Audio generated: {output_path}")
+            return {"path": output_path, "voice_id": voice_id, "text": text}
 
-# --- Legacy Wrappers (Kept for compatibility if other files call them) ---
+        except Exception as e:
+            logger.error(f"🔴 Audio generation failed: {e}")
+            attempt += 1
+            if attempt <= retries:
+                sleep(1)  # brief wait before retry
+            else:
+                return None
 
-def generate_voiceover_and_upload(script: str, voice_id: str) -> str:
+# -----------------------------
+# Multi-Scene / Multi-Character Support
+# -----------------------------
+def generate_audio_for_scenes(scenes: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """
-    Wrapper that generates audio and returns a path. 
-    (The worker now handles the upload to Cloudinary, so we just return the path).
+    Accepts a list of scenes:
+        [
+            {"text": "Scene 1 dialogue", "voice_id": "xyz"},
+            {"text": "Scene 2 narration", "voice_id": "abc"},
+            ...
+        ]
+    Returns a list of dicts with audio paths.
     """
-    return generate_audio_for_scene(script, voice_id) or ""
+    results = []
+    for scene in scenes:
+        text = scene.get("text")
+        voice_id = scene.get("voice_id")
+        audio = generate_audio_for_scene(text, voice_id)
+        if audio:
+            results.append(audio)
+        else:
+            logger.warning(f"⚠️ Failed to generate audio for scene: {text}")
+    return results
 
-def generate_multi_voice_audio(segments: List[Dict[str, str]]) -> str:
+# -----------------------------
+# Legacy Wrapper (Optional)
+# -----------------------------
+def generate_voiceover_and_upload(script: str, voice_id: Optional[str] = None) -> str:
     """
-    Placeholder. The new Celery Worker handles stitching via FFmpeg directly.
+    Single script wrapper for legacy compatibility.
+    Returns path or empty string.
     """
-    logger.warning("⚠️ generate_multi_voice_audio is deprecated. Logic moved to Celery Worker.")
-    return ""
+    audio = generate_audio_for_scene(script, voice_id)
+    return audio["path"] if audio else ""
+
+# -----------------------------
+# Example Usage
+# -----------------------------
+if __name__ == "__main__":
+    # Example: 4 scenes with different characters
+    test_scenes = [
+        {"text": "Hello! I am the narrator.", "voice_id": "pqHfZKP75CvOlQylNhV4"},
+        {"text": "Ali enters the room and looks around.", "voice_id": "xyz123VoiceID"},
+        {"text": "The sun sets over the horizon.", "voice_id": "pqHfZKP75CvOlQylNhV4"},
+        {"text": "End scene with dramatic music.", "voice_id": "abc456VoiceID"}
+    ]
+    audio_files = generate_audio_for_scenes(test_scenes)
+    print("Generated audio files:", audio_files)
+
