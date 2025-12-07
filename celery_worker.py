@@ -209,39 +209,20 @@ def extract_json_list_from_text(text: str) -> Optional[list]:
 # Replicate safe runner
 # -------------------------
 def normalize_replicate_output(raw):
-    """
-    Replicate API can return:
-      - a string URL,
-      - a list of strings,
-      - a dict with 'url' or path,
-      - nested structures.
-    Normalize to a single URL string if possible; otherwise return str(raw).
-    """
     try:
         if raw is None:
             return None
         if isinstance(raw, str):
             return raw
         if isinstance(raw, (list, tuple)) and raw:
-            # find first string-looking element
             for v in raw:
                 if isinstance(v, str):
                     return v
-                if isinstance(v, dict) and ("url" in v or "output" in v):
-                    return v.get("url") or v.get("output")
             return str(raw[0])
         if isinstance(raw, dict):
             for key in ("url", "output", "result", "video", "file"):
                 if key in raw:
                     return raw.get(key)
-            # sometimes outputs are nested lists
-            for v in raw.values():
-                if isinstance(v, str):
-                    return v
-                if isinstance(v, (list, tuple)) and v:
-                    if isinstance(v[0], str):
-                        return v[0]
-            return json.dumps(raw)
         return str(raw)
     except Exception:
         return str(raw)
@@ -254,7 +235,6 @@ def get_latest_model_version_id(model_name: str) -> Optional[str]:
         versions = model.versions.list()
         if not versions:
             return None
-        # versions.list() returns iterable-like; pick first/latest
         latest = versions[0].id if hasattr(versions[0], "id") else str(versions[0])
         return latest
     except Exception as e:
@@ -265,7 +245,6 @@ def replicate_run_safe(model_name: str, version: Optional[str] = None, **kwargs)
     """
     Run a Replicate model safely. If the provided version fails due to "invalid version or not permitted",
     attempt to fetch the latest version and retry once.
-    Returns a normalized URL/string or raises.
     """
     if not replicate_client:
         raise RuntimeError("Replicate client not configured")
@@ -279,26 +258,27 @@ def replicate_run_safe(model_name: str, version: Optional[str] = None, **kwargs)
             else:
                 latest = get_latest_model_version_id(model_name)
                 if not latest:
-                    raise RuntimeError(f"No versions available for {model_name}")
-                model_ref = f"{model_name}:{latest}"
-                attempt_version = latest
+                    # [FIX] Hard fallback if listing fails (common 404 issue)
+                    if "flux" in model_name: 
+                        # Use a known stable hash for Flux Schnell
+                        model_ref = "black-forest-labs/flux-schnell" 
+                    else:
+                        raise RuntimeError(f"No versions available for {model_name}")
+                else:
+                    model_ref = f"{model_name}:{latest}"
+                    attempt_version = latest
                 tried_latest = True
 
-            logging.info(f"Replicate: running {model_ref} with input keys: {list(kwargs.get('input', {}).keys()) if 'input' in kwargs else 'N/A'}")
-            # Use client.run to keep parity with earlier behavior
+            logging.info(f"Replicate: running {model_ref}")
             raw = replicate_client.run(model_ref, **kwargs) if hasattr(replicate_client, "run") else replicate_client.predict(model_ref, **kwargs)
             url = normalize_replicate_output(raw)
-            logging.info(f"Replicate returned: {url}")
             return url
         except Exception as e:
             msg = str(e).lower()
             logging.error(f"Replicate run failed for {model_name} (version={attempt_version}): {e}")
-            # Detect invalid version / permission error from message or HTTP detail
-            if ("invalid version" in msg or "not permitted" in msg or "does not exist" in msg or "422" in msg) and not tried_latest:
-                logging.info("Detected invalid or not permitted version; fetching latest and retrying.")
+            if ("invalid version" in msg or "not permitted" in msg or "422" in msg or "404" in msg) and not tried_latest:
+                logging.info("Detected invalid version; fetching latest and retrying.")
                 attempt_version = get_latest_model_version_id(model_name)
-                if not attempt_version:
-                    raise
                 tried_latest = True
                 continue
             raise
@@ -333,19 +313,22 @@ def ensure_character(name: str, appearance_prompt: Optional[str] = None, referen
 # -------------------------
 def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
     """
-    Uses replicate model black-forest-labs/flux-schnell (or similar).
-    If replicate_client is missing, raises.
+    Uses replicate model black-forest-labs/flux-schnell.
+    Includes RETRY logic for 404 errors.
     """
-    try:
-        model_name = "black-forest-labs/flux-schnell"
-        input_payload = {"prompt": prompt, "aspect_ratio": aspect, "output_format": "jpg"}
-        url = replicate_run_safe(model_name, input=input_payload)
-        if not url:
-            raise RuntimeError("Flux returned empty response")
-        return str(url)
-    except Exception as e:
-        logging.error(f"Flux image generation failed: {e}")
-        raise
+    model_name = "black-forest-labs/flux-schnell"
+    input_payload = {"prompt": prompt, "aspect_ratio": aspect, "output_format": "jpg"}
+    
+    # Retry loop specifically for Flux
+    for i in range(3):
+        try:
+            url = replicate_run_safe(model_name, input=input_payload)
+            if url: return str(url)
+        except Exception as e:
+            logging.warning(f"Flux attempt {i+1} failed: {e}")
+            time.sleep(2) # Wait 2s before retry
+            
+    raise RuntimeError("Flux image generation failed after 3 attempts")
 
 # -------------------------
 # Single scene processor (robust)
@@ -362,7 +345,7 @@ def process_single_scene(
     temp_dir = os.path.join("/tmp", f"scene_{index}_{request_id}")
     os.makedirs(temp_dir, exist_ok=True)
     try:
-        sleep_time = random.randint(2, 8)  # shorten random to be snappier
+        sleep_time = random.randint(2, 8)
         time.sleep(sleep_time)
 
         target_face_url = None
@@ -381,29 +364,22 @@ def process_single_scene(
 
         video_url = None
 
-        # If user supplied mp4
         if scene.get("image_url") and str(scene.get("image_url")).endswith(".mp4"):
             temp_path = os.path.join(temp_dir, f"user_upload_{index}.mp4")
             download_to_file(scene.get("image_url"), temp_path)
             return {"index": index, "video_path": temp_path, "status": "success"}
 
-        # Lip sync
-        if not is_cinematic_shot and audio_path and (generate_lip_sync_with_replicate or replicate_client) and target_face_url:
-            # Upload audio to cloudinary so replicate can fetch (some models require accessible URL)
+        # Lip sync - Use SAFE RUNNER directly
+        if not is_cinematic_shot and audio_path and target_face_url:
             cloud_audio_url = None
             try:
                 cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
             except Exception as e:
-                logging.error(f"Audio upload for lip-sync failed: {e}")
-                cloud_audio_url = None
+                logging.error(f"Audio upload failed: {e}")
 
-            # prefer wrapper if present else call replicate directly
-            try:
-                if generate_lip_sync_with_replicate:
-                    res = generate_lip_sync_with_replicate(image_url=target_face_url, audio_url=cloud_audio_url)
-                    video_url = normalize_replicate_output(res)
-                else:
-                    # use sadtalker model - auto-detect latest if version causes error
+            if cloud_audio_url:
+                try:
+                    # Verified Public Model (Safe Runner will fix version if needed)
                     model_name = "lucataco/sadtalker"
                     input_payload = {
                         "source_image": target_face_url,
@@ -416,29 +392,26 @@ def process_single_scene(
                         "ref_pose": None
                     }
                     video_url = replicate_run_safe(model_name, input=input_payload)
-            except Exception as e:
-                logging.error(f"Lip-sync generation failed for scene {index}: {e}")
-                video_url = None
+                except Exception as e:
+                    logging.error(f"Lip-sync failed: {e}")
+                    video_url = None
 
         # Cinematic B-roll
         if not video_url:
             action = f"{scene.get('action_prompt','cinematic movement')}, camera:{scene.get('camera_angle','35mm')}"
             start_image = target_face_url or None
             if not start_image:
-                # generate cinematic starting image
-                start_image = generate_flux_image(f"{scene.get('visual_prompt','cinematic scene')}, cinematic lighting, ultra-detailed", aspect=aspect)
-            # prefer wrapper if available
+                try:
+                    start_image = generate_flux_image(f"{scene.get('visual_prompt','cinematic scene')}, cinematic lighting, 8k", aspect=aspect)
+                except: pass
+            
             try:
-                if generate_video_scene_with_replicate:
-                    res = generate_video_scene_with_replicate(prompt=action, image_url=start_image, aspect=aspect)
-                    video_url = normalize_replicate_output(res)
-                else:
-                    # fallback: example WAN-like model name; replace with your actual model if different
-                    model_name = "wan/wan-video"  # <-- replace with actual model if you have
-                    input_payload = {"prompt": action, "image": start_image, "aspect": aspect}
-                    video_url = replicate_run_safe(model_name, input=input_payload)
+                model_name = "wan-video/wan-2.1-1.3b"
+                input_payload = {"prompt": action, "aspect_ratio": aspect}
+                if start_image: input_payload["image"] = start_image
+                video_url = replicate_run_safe(model_name, input=input_payload)
             except Exception as e:
-                logging.error(f"Cinematic generation failed for scene {index}: {e}")
+                logging.error(f"Cinematic failed: {e}")
                 video_url = None
 
         if not video_url:
@@ -453,20 +426,15 @@ def process_single_scene(
         logging.error(f"Scene {index} failed: {traceback.format_exc()}")
         return {"index": index, "video_path": None, "status": "failed"}
     finally:
-        # keep temp_dir for debugging if failure; remove only on success to help debugging logs if needed
         if os.path.exists(temp_dir):
-            # if success remove, otherwise keep for investigation
             try:
-                # determine success by checking for output files
-                # remove if any video file exists -> assume success cleanup
                 files = os.listdir(temp_dir)
                 if any(f.endswith(".mp4") for f in files):
                     shutil.rmtree(temp_dir)
-            except Exception:
-                pass
+            except Exception: pass
 
 # -------------------------
-# Stitching (unchanged but with better logging)
+# Stitching
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     request_id = str(uuid.uuid4())
@@ -475,13 +443,11 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
     input_list_path = os.path.join(temp_dir, "inputs.txt")
     chunk_paths = []
     try:
-        logging.info(f"Processing {len(scene_pairs)} pairs for Request ID: {request_id}")
+        logging.info(f"Processing {len(scene_pairs)} pairs")
         for i, (video, audio) in enumerate(scene_pairs):
             chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
             audio_dur = get_media_duration(audio)
-            if audio_dur == 0:
-                logging.warning(f"Audio duration is 0 for {audio}, skipping chunk.")
-                continue
+            if audio_dur == 0: continue
             cmd = [
                 "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
                 "-t", str(audio_dur),
@@ -495,43 +461,29 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                 "-shortest",
                 chunk_name
             ]
-            logging.info(f"Running ffmpeg chunk cmd for scene {i}: {' '.join(cmd[:6])} ...")
             subprocess.run(cmd, check=True, capture_output=True)
             chunk_paths.append(chunk_name)
 
-        if not chunk_paths:
-            logging.error("No chunk paths created; nothing to concatenate.")
-            return False
+        if not chunk_paths: return False
 
         with open(input_list_path, "w") as f:
             for chunk in chunk_paths:
                 abs_path = os.path.abspath(chunk).replace("'", "'\\''")
                 f.write(f"file '{abs_path}'\n")
 
-        logging.info("Concatenating chunks...")
         subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", input_list_path, "-c", "copy", output_path
         ], check=True, capture_output=True)
-
-        logging.info(f"✅ Video successfully saved to {output_path}")
         return True
-    except subprocess.CalledProcessError as e:
-        logging.error(f"FFmpeg failed: returncode={getattr(e,'returncode',None)} stdout={getattr(e,'stdout',None)} stderr={getattr(e,'stderr',None)}")
-        return False
     except Exception as e:
-        logging.error(f"General stitching error: {e}")
+        logging.error(f"Stitching error: {e}")
         return False
     finally:
-        # cleanup chunk files
-        try:
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-        except Exception:
-            pass
+        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
 # -------------------------
-# Scraping & Storyboard + OpenAI wrappers (kept similar)
+# Scraping & Storyboard + OpenAI wrappers
 # -------------------------
 def scrape_youtube_videos(keyword: str, provider: str = "scrapingbee", max_results: int = 3) -> List[dict]:
     results = []
@@ -544,9 +496,7 @@ def scrape_youtube_videos(keyword: str, provider: str = "scrapingbee", max_resul
             url = f"https://www.youtube.com/results?search_query={requests.utils.quote(keyword)}"
             params = {"api_key": SCRAPINGBEE_API_KEY, "url": url, "render_js": "false"}
             r = requests.get("https://app.scrapingbee.com/api/v1/", params=params, timeout=30)
-            if r.status_code == 200:
-                # For now return empty; user may parse later
-                pass
+            if r.status_code == 200: pass
     except Exception as e:
         logging.error(f"Scraping error: {e}")
     return results
@@ -558,14 +508,10 @@ def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: 
     if not openai_client: raise RuntimeError("OpenAI client not configured")
     try:
         system_content = "You are a professional screenwriter."
-        if is_json:
-            system_content += " You must output valid JSON."
+        if is_json: system_content += " You must output valid JSON."
         completion = openai_client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL","gpt-4o"),
-            messages=[
-                {"role":"system","content": system_content},
-                {"role":"user","content":prompt_content}
-            ],
+            messages=[{"role":"system","content": system_content},{"role":"user","content":prompt_content}],
             temperature=temperature,
             response_format={"type": "json_object"} if is_json else {"type": "text"}
         )
@@ -577,15 +523,10 @@ def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: 
 def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict) -> dict:
     prompt_template = load_prompt_template("prompt_video_storyboard_creator.txt")
     if not prompt_template:
-        prompt_template = """
-        TASK: Create an original short film script for '$keyword'.
-        Output valid JSON with keys: video_title, video_description, main_character_profile, characters (list), scenes (list).
-        """
+        prompt_template = "TASK: Create script for '$keyword'. Output valid JSON."
     template = Template(prompt_template)
     full_context = keyword
-    if form_data.get("characters"):
-        full_context += f"\n\nUSER DEFINED CHARACTERS:\n{form_data.get('characters')}"
-
+    if form_data.get("characters"): full_context += f"\n\nUSER DEFINED CHARACTERS:\n{form_data.get('characters')}"
     target_scenes = form_data.get("max_scenes", 7)
     prompt = template.safe_substitute(
         keyword=full_context,
@@ -598,12 +539,9 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
     prompt += f"\n\nIMPORTANT: The 'audio_narration' across all scenes MUST total at least 150 words. Do not write short scripts. Generate exactly {target_scenes} scenes."
     raw = get_openai_response(prompt, temperature=0.6, is_json=True)
     obj = extract_json_from_text(raw) or (json.loads(raw) if raw else {})
-    if not obj:
-        raise RuntimeError("Storyboard generation failed")
-    try:
-        return StoryboardSchema(**obj).dict()
-    except ValidationError:
-        return {"video_title": "Untitled", "scenes": obj.get("scenes", []), "characters": obj.get("characters", [])}
+    if not obj: raise RuntimeError("Storyboard generation failed")
+    try: return StoryboardSchema(**obj).dict()
+    except ValidationError: return {"video_title": "Untitled", "scenes": obj.get("scenes", []), "characters": obj.get("characters", [])}
 
 def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
     characters = storyboard.get('characters', [])
@@ -622,8 +560,7 @@ def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
     try:
         raw = get_openai_response(prompt, temperature=0.1, is_json=True)
         segments = extract_json_list_from_text(raw) or []
-    except Exception:
-        segments = []
+    except Exception: segments = []
     if not isinstance(segments, list) or len(segments) == 0:
         return [{"speaker": "Narrator", "text": full_script_text, "voice_id": form_data.get("voice_selection")}]
     final_segments = []
@@ -634,18 +571,15 @@ def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
         if not text: continue
         voice = main_voice_id 
         char_obj = next((c for c in characters if c.get("name") in speaker_name or speaker_name in c.get("name")), None)
-        if char_obj and char_obj.get("voice_id"):
-            voice = char_obj.get("voice_id")
+        if char_obj and char_obj.get("voice_id"): voice = char_obj.get("voice_id")
         final_segments.append({"text": text, "voice_id": voice})
     return final_segments
 
 def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Optional[str]:
     summary = storyboard.get("video_description") or "Video"
     prompt = f"Movie poster for: {summary}. High quality, 8k, textless."
-    try:
-        return generate_flux_image(prompt, aspect=orientation)
-    except Exception:
-        return None
+    try: return generate_flux_image(prompt, aspect=orientation)
+    except Exception: return None
 
 def youtube_metadata_agent(full_script: str, keyword: str, form_data: dict, blueprint: dict) -> dict:
     prompt_template = load_prompt_template("prompt_youtube_metadata_generator.txt")
@@ -706,88 +640,62 @@ def background_generate_video(self, form_data: dict):
         for i, scene in enumerate(scenes):
             text = segments[i].get("text") if i < len(segments) else "..."
             voice_id = segments[i].get("voice_id") if i < len(segments) else "21m00Tcm4TlvDq8ikWAM"
-            if voice_id:
-                voice_id = voice_id.strip(" []'\"")
+            if voice_id: voice_id = voice_id.strip(" []'\"")
             full_script_text += text + " "
+            audio_path = None
             if generate_audio_for_scene:
-                try:
-                    audio_path = generate_audio_for_scene(text, voice_id)
+                try: audio_path = generate_audio_for_scene(text, voice_id)
                 except Exception as e:
                     logging.error(f"Audio generation failed for scene {i}: {e}")
                     audio_path = None
-            else:
-                audio_path = None
             if audio_path:
                 duration = get_media_duration(audio_path)
                 scene_assets.append({
-                    "index": i,
-                    "audio_path": audio_path,
-                    "duration": duration,
-                    "scene_data": scene
+                    "index": i, "audio_path": audio_path, "duration": duration, "scene_data": scene
                 })
-        if not scene_assets:
-            raise RuntimeError("Audio generation failed for all scenes.")
+        if not scene_assets: raise RuntimeError("Audio generation failed for all scenes.")
         update_status("Rendering Video Scenes (Synced)...")
         aspect = "9:16" if form_data.get("video_type") == "reel" else "16:9"
         final_pairs = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_to_asset = {
-                executor.submit(
-                    process_single_scene,
-                    asset["scene_data"],
-                    asset["index"],
-                    char_profile,
-                    asset["audio_path"],
-                    character_faces,
-                    aspect
-                ): asset
+                executor.submit(process_single_scene, asset["scene_data"], asset["index"], char_profile, asset["audio_path"], character_faces, aspect): asset
                 for asset in scene_assets
             }
             results_map = {}
             for future in concurrent.futures.as_completed(future_to_asset):
                 asset = future_to_asset[future]
                 idx = asset["index"]
-                try:
-                    res = future.result()
+                try: res = future.result()
                 except Exception as e:
                     logging.error(f"Scene {idx} raised exception: {e}")
                     res = {"index": idx, "video_path": None, "status": "failed"}
                 if res["status"] == "success" and res["video_path"]:
                     results_map[idx] = (res["video_path"], asset["audio_path"])
-                else:
-                    logging.warning(f"Scene {idx} video failed. Skipping.")
+                else: logging.warning(f"Scene {idx} video failed. Skipping.")
             for i in range(len(scenes)):
-                if i in results_map:
-                    final_pairs.append(results_map[i])
-        if not final_pairs:
-            raise RuntimeError("Video generation failed for all scenes.")
+                if i in results_map: final_pairs.append(results_map[i])
+        if not final_pairs: raise RuntimeError("Video generation failed.")
         update_status("Final Assembly (Audio-Video Sync)...")
         music_tone = blueprint.get("tone", "motivational")
         music_url = MUSIC_LIBRARY.get(music_tone, MUSIC_LIBRARY["default"])
         music_path = os.path.join(tempfile.gettempdir(), f"music_{uuid.uuid4()}.mp3")
-        try:
-            download_to_file(music_url, music_path)
-        except Exception:
-            music_path = None
+        try: download_to_file(music_url, music_path)
+        except: music_path = None
         final_output_path = f"/tmp/final_render_{task_id}.mp4"
         temp_visual_path = f"/tmp/visual_base_{task_id}.mp4"
         success = stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path)
-        if not success:
-            raise RuntimeError("Stitching failed.")
+        if not success: raise RuntimeError("Stitching failed.")
         if music_path:
             cmd = [
-                "ffmpeg", "-y",
-                "-i", temp_visual_path,
-                "-stream_loop", "-1", "-i", music_path,
+                "ffmpeg", "-y", "-i", temp_visual_path, "-stream_loop", "-1", "-i", music_path,
                 "-filter_complex", "[1:a]volume=0.15[bg];[0:a][bg]amix=inputs=2:duration=first[outa]",
                 "-map", "0:v", "-map", "[outa]",
                 "-c:v", "libx264", "-vf", "scale='min(720,iw)':-2", "-preset", "ultrafast", "-crf", "28",
-                "-c:a", "aac", "-shortest",
-                final_output_path
+                "-c:a", "aac", "-shortest", final_output_path
             ]
             subprocess.run(cmd, check=True)
-        else:
-            shutil.move(temp_visual_path, final_output_path)
+        else: shutil.move(temp_visual_path, final_output_path)
         update_status("Uploading & Finalizing...")
         final_video_url = safe_upload_to_cloudinary(final_output_path, folder="final_videos")
         thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
@@ -799,8 +707,7 @@ def background_generate_video(self, form_data: dict):
             for v, a in final_pairs:
                 if os.path.exists(v): os.remove(v)
                 if a and os.path.exists(a): os.remove(a)
-        except Exception:
-            pass
+        except: pass
         return {
             "status": "ready",
             "video_url": final_video_url,
