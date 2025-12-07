@@ -28,12 +28,23 @@ from celery_init import celery
 from openai import OpenAI
 import replicate
 
-# --- UTILS IMPORT ---
+# --- UTILS IMPORT SAFETY BLOCK ---
+# We try to import, but if it fails, we use local fallbacks to ensure the code never breaks.
 try:
     from utils.ffmpeg_utils import get_media_duration
 except ImportError:
-    # Fallback if utils file is missing
-    def get_media_duration(*args, **kwargs): return 5.0
+    # Fallback: Robust local function to get duration
+    def get_media_duration(file_path):
+        try:
+            cmd = [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", file_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return float(result.stdout.strip())
+        except Exception as e:
+            logging.error(f"Error getting duration for {file_path}: {e}")
+            return 5.0
 
 # --- CLIENT IMPORT SAFETY BLOCK ---
 try:
@@ -172,11 +183,11 @@ def extract_json_list_from_text(text: str) -> Optional[list]:
     return None
 
 # -------------------------
-# LOW-MEMORY VIDEO STITCHER (Fixes SIGKILL Crash)
+# [CRITICAL FIX] LOW-MEMORY VIDEO STITCHER
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     """
-    Local optimized version of stitching to prevent OOM kills.
+    Local optimized version of stitching to prevent Server Crashes (SIGKILL).
     Uses 'ultrafast' preset and 'crf 28' to minimize RAM usage.
     """
     request_id = str(uuid.uuid4())
@@ -199,14 +210,16 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                 continue
 
             # COMMAND OPTIMIZED FOR LOW MEMORY ENVIRONMENTS
+            # -preset ultrafast: Uses less CPU/RAM
+            # -crf 28: Compresses more to save buffer size
             cmd = [
                 "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
                 "-t", str(audio_dur), 
                 "-map", "0:v", "-map", "1:a",
                 "-c:v", "libx264", 
                 "-pix_fmt", "yuv420p", 
-                "-preset", "ultrafast",  # <--- CHANGED: Uses minimal RAM
-                "-crf", "28",            # <--- ADDED: Slightly lower quality to save RAM
+                "-preset", "ultrafast",  # <--- CRITICAL FIX
+                "-crf", "28",            # <--- CRITICAL FIX
                 "-c:a", "aac", 
                 "-shortest",
                 chunk_name
@@ -382,14 +395,14 @@ def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
     return str(output[0]) if isinstance(output, (list, tuple)) else str(output)
 
 # -------------------------
-# [UPDATED] Scene Processor 
+# Scene Processor 
 # -------------------------
 def process_single_scene(
     scene: dict, 
     index: int, 
     character_profile: str, 
-    audio_path: str = None,   # [UPDATED] Pass audio for syncing
-    reference_img_url: str = None, # [UPDATED] Pass master face for consistency
+    audio_path: str = None,   # Pass audio for syncing
+    reference_img_url: str = None, # Pass master face for consistency
     aspect: str = "16:9"
 ) -> dict:
     """
@@ -456,31 +469,6 @@ def process_single_scene(
         return {"index": index, "video_path": None, "status": "failed"}
 
 # -------------------------
-# Metadata Helpers
-# -------------------------
-def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Optional[str]:
-    summary = storyboard.get("video_description") or "Video"
-    prompt = f"Movie poster for: {summary}. High quality, 8k, textless."
-    try:
-        return generate_flux_image(prompt, aspect=orientation)
-    except: return None
-
-def youtube_metadata_agent(full_script: str, keyword: str, form_data: dict, blueprint: dict) -> dict:
-    prompt_template = load_prompt_template("prompt_youtube_metadata_generator.txt")
-    if not prompt_template: return {}
-    template = Template(prompt_template)
-    prompt = template.safe_substitute(
-        primary_keyword=keyword,
-        full_script=full_script[:3000],
-        language=form_data.get("language", "english"),
-        video_type=form_data.get("video_type", "reel"),
-        blueprint_data=json.dumps(blueprint),
-        thumbnail_concept=form_data.get("thumbnail_concept", "")
-    )
-    raw = get_openai_response(prompt, temperature=0.4, is_json=True)
-    return extract_json_from_text(raw) or json.loads(raw)
-
-# -------------------------
 # Celery Task (SaaS Logic)
 # -------------------------
 @celery.task(bind=True)
@@ -514,32 +502,27 @@ def background_generate_video(self, form_data: dict):
 
         char_profile = characters[0].get("appearance_prompt", "Cinematic") if characters else "Cinematic"
 
-        # [UPDATED] GENERATE MASTER CHARACTER IMAGE ONCE (Consistency Fix)
-        # Check if user uploaded a face, otherwise generate one "Actor" for the whole movie
+        # GENERATE MASTER CHARACTER IMAGE ONCE
         master_face_url = None
         if uploaded_images:
             master_face_url = uploaded_images[0]
         else:
-            # Generate the Hero Face
             update_status("Casting AI Actor (Generating Consistent Face)...")
             aspect_ratio = "9:16" if form_data.get("video_type") == "reel" else "16:9"
             hero_prompt = f"Portrait of {char_profile}, facing camera, neutral expression, high detailed, 8k"
             master_face_url = generate_flux_image(hero_prompt, aspect=aspect_ratio)
 
-        # 3. [NEW] Audio-First Pipeline
+        # 3. Audio-First Pipeline
         update_status("Synthesizing Audio Dialogue...")
         segments = refine_script_with_roles(storyboard, form_data)
         
-        # This list will hold: {'index': 0, 'audio_path': '...', 'duration': 4.5, 'scene_data': ...}
         scene_assets = [] 
         full_script_text = ""
 
-        # Loop through storyboard scenes (not just segments, to ensure 1-to-1 mapping)
+        # Loop through storyboard scenes
         scenes = storyboard.get("scenes", [])
         
         for i, scene in enumerate(scenes):
-            # Match segment to scene (simple 1-to-1 mapping for now)
-            # In a complex app, you might have multiple lines per scene, but for MVP SaaS, keep 1-to-1
             text = segments[i].get("text") if i < len(segments) else "..."
             voice_id = segments[i].get("voice_id") if i < len(segments) else "21m00Tcm4TlvDq8ikWAM"
             full_script_text += text + " "
@@ -559,22 +542,19 @@ def background_generate_video(self, form_data: dict):
                     "scene_data": scene
                 })
             else:
-                # Handle silent scenes or errors
                 pass
 
         if not scene_assets:
             raise RuntimeError("Audio generation failed for all scenes.")
 
-        # 4. [NEW] Video Generation (Targeted Duration)
+        # 4. Video Generation (Targeted Duration)
         update_status("Rendering Video Scenes (Synced)...")
         aspect = "9:16" if form_data.get("video_type") == "reel" else "16:9"
         
-        # Pairs for stitching: (video_path, audio_path)
         final_pairs = []
         
         # Parallel Execution
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            # [UPDATED] Pass master_face_url and audio_path to scene processor
             future_to_asset = {
                 executor.submit(
                     process_single_scene, 
@@ -588,14 +568,11 @@ def background_generate_video(self, form_data: dict):
                 for asset in scene_assets
             }
             
-            # Collect results and keep them in order of index
-            # We use a temp dict to store results then sort
             results_map = {}
-            
             for future in concurrent.futures.as_completed(future_to_asset):
                 asset = future_to_asset[future]
                 idx = asset["index"]
-                res = future.result() # returns {"index":..., "video_path":..., "status":...}
+                res = future.result()
                 
                 if res["status"] == "success" and res["video_path"]:
                     results_map[idx] = (res["video_path"], asset["audio_path"])
@@ -610,7 +587,7 @@ def background_generate_video(self, form_data: dict):
         if not final_pairs:
             raise RuntimeError("Video generation failed for all scenes.")
 
-        # 5. [NEW] Stitching (SaaS Logic)
+        # 5. Stitching (SaaS Logic)
         update_status("Final Assembly (Audio-Video Sync)...")
         
         # Prepare Music
@@ -622,13 +599,11 @@ def background_generate_video(self, form_data: dict):
         except:
             music_path = None # Proceed without music if fail
 
-        # Stitch - USING OPTIMIZED LOCAL FUNCTION
+        # Stitch
         final_output_path = f"/tmp/final_render_{task_id}.mp4"
         
-        # Step A: Stitch Scenes using the new LOW-MEMORY function
+        # Step A: Stitch Scenes using LOCAL OPTIMIZED FUNCTION
         temp_visual_path = f"/tmp/visual_base_{task_id}.mp4"
-        
-        # [CRITICAL FIX] Use local optimized function instead of imported one
         success = stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path)
         
         if not success:
@@ -636,14 +611,14 @@ def background_generate_video(self, form_data: dict):
         
         # Step B: Add Background Music (Ducking)
         if music_path:
-            # [CRITICAL FIX] Added -preset ultrafast and -crf 28 here too
+            # LOW MEMORY COMMAND
             cmd = [
                 "ffmpeg", "-y",
                 "-i", temp_visual_path,
                 "-stream_loop", "-1", "-i", music_path,
                 "-filter_complex", "[1:a]volume=0.15[bg];[0:a][bg]amix=inputs=2:duration=first[outa]",
                 "-map", "0:v", "-map", "[outa]",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", # Low Memory settings
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
                 "-c:a", "aac", "-shortest",
                 final_output_path
             ]
