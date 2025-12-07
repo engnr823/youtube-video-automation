@@ -27,6 +27,7 @@ from celery_init import celery
 # AI Clients
 from openai import OpenAI
 import replicate
+from elevenlabs import VoiceSettings # Needed for voice stability fix
 
 # --- UTILS IMPORT SAFETY BLOCK ---
 try:
@@ -182,12 +183,11 @@ def extract_json_list_from_text(text: str) -> Optional[list]:
     return None
 
 # -------------------------
-# LOW-MEMORY VIDEO STITCHER
+# [CRITICAL] LOW-MEMORY RESIZING VIDEO STITCHER
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     """
-    Local optimized version of stitching to prevent Server Crashes (SIGKILL).
-    Uses 'ultrafast' preset, 'crf 28', and RESIZES video to 720p/1080p to fit in RAM.
+    Stitches videos with 'ultrafast' preset and 720p RESIZING to prevent Memory Crashes.
     """
     request_id = str(uuid.uuid4())
     temp_dir = os.path.join("/tmp", f"render_{request_id}")
@@ -207,16 +207,16 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                 logging.warning(f"Audio duration is 0 for {audio}, skipping chunk.")
                 continue
 
-            # COMMAND OPTIMIZED FOR LOW MEMORY
+            # COMMAND: Resize to 720p width (maintain aspect) to save RAM
             cmd = [
                 "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
                 "-t", str(audio_dur), 
                 "-map", "0:v", "-map", "1:a",
                 "-c:v", "libx264", 
                 "-pix_fmt", "yuv420p",
-                "-vf", "scale='min(720,iw)':-2", # Force Resize
-                "-preset", "ultrafast", 
-                "-crf", "28", 
+                "-vf", "scale='min(720,iw)':-2", # <--- FORCE HD RESIZE
+                "-preset", "ultrafast",          # <--- LOW MEMORY
+                "-crf", "28",                    # <--- LOW BUFFER
                 "-c:a", "aac", 
                 "-shortest",
                 chunk_name
@@ -227,6 +227,7 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
 
         with open(input_list_path, "w") as f:
             for chunk in chunk_paths:
+                # Escape filename safely
                 abs_path = os.path.abspath(chunk).replace("'", "'\\''")
                 f.write(f"file '{abs_path}'\n")
 
@@ -390,7 +391,7 @@ def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
     return str(output[0]) if isinstance(output, (list, tuple)) else str(output)
 
 # -------------------------
-# Scene Processor with SMART CINEMATIC LOGIC
+# [CRITICAL] SMART DIRECTOR LOGIC (Scenery vs Talking)
 # -------------------------
 def process_single_scene(
     scene: dict, 
@@ -400,6 +401,9 @@ def process_single_scene(
     reference_img_url: str = None,
     aspect: str = "16:9"
 ) -> dict:
+    """
+    Decides between Lip-Sync (Close-up) and Cinematic B-Roll (Wide).
+    """
     try:
         # Rate Limit Buffer
         sleep_time = random.randint(5, 15)
@@ -409,13 +413,14 @@ def process_single_scene(
         shot_type = scene.get("shot_type", "medium").lower()
         has_dialogue = bool(scene.get("audio_narration") and len(scene.get("audio_narration")) > 2)
         
-        # SMART LOGIC: If it's a wide/drone shot OR no dialogue, force B-Roll.
+        # LOGIC: Wide shot = Cinematic. No dialogue = Cinematic.
         is_cinematic_shot = "wide" in shot_type or "drone" in shot_type or "establish" in shot_type or not has_dialogue
 
-        # 2. Prepare Reference Image (Consistency)
+        # 2. Prepare Base Image
         keyframe_url = None
         
         if scene.get("image_url") and str(scene.get("image_url")).endswith(".mp4"):
+             # User uploaded video
              temp_path = f"/tmp/user_upload_{index}_{uuid.uuid4()}.mp4"
              download_to_file(scene.get("image_url"), temp_path)
              return {"index": index, "video_path": temp_path, "status": "success"}
@@ -423,11 +428,13 @@ def process_single_scene(
         if scene.get("image_url"):
             keyframe_url = scene.get("image_url")
         elif reference_img_url and not is_cinematic_shot:
+            # Only use Consistent Face if it's a Close-Up
             keyframe_url = reference_img_url 
         else:
+            # Generate new scenery for B-Roll
             visual_setting = scene.get("visual_prompt", "")
             full_prompt = f"{visual_setting}, cinematic lighting, 8k, photorealistic"
-            if not is_cinematic_shot: 
+            if not is_cinematic_shot: # If talking but no ref image, mention char
                 full_prompt = f"{character_profile}, {full_prompt}"
             
             keyframe_url = generate_flux_image(full_prompt, aspect=aspect)
@@ -435,10 +442,12 @@ def process_single_scene(
         # 3. Generate Video
         video_url = None
         
+        # Branch 1: Lip Sync (Talking Head)
         if not is_cinematic_shot and audio_path and generate_lip_sync_with_replicate:
             cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
             video_url = generate_lip_sync_with_replicate(keyframe_url, cloud_audio_url)
             
+        # Branch 2: Cinematic B-Roll (Wan 2.1)
         else:
             action = scene.get("action_prompt", "cinematic movement") + f", camera:{scene.get('camera_angle','35mm')}"
             video_url = generate_video_scene_with_replicate(prompt=action, image_url=keyframe_url, aspect=aspect)
@@ -454,9 +463,10 @@ def process_single_scene(
         return {"index": index, "video_path": None, "status": "failed"}
 
 # -------------------------
-# RESTORED Metadata Helpers (Fixed NameError)
+# [RESTORED] Metadata Helpers (Fixes NameError)
 # -------------------------
 def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Optional[str]:
+    """Generates a poster image using Flux"""
     summary = storyboard.get("video_description") or "Video"
     prompt = f"Movie poster for: {summary}. High quality, 8k, textless."
     try:
@@ -464,6 +474,7 @@ def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Opt
     except: return None
 
 def youtube_metadata_agent(full_script: str, keyword: str, form_data: dict, blueprint: dict) -> dict:
+    """Generates Titles, Descriptions, Tags"""
     prompt_template = load_prompt_template("prompt_youtube_metadata_generator.txt")
     if not prompt_template: return {}
     template = Template(prompt_template)
@@ -535,7 +546,7 @@ def background_generate_video(self, form_data: dict):
             text = segments[i].get("text") if i < len(segments) else "..."
             voice_id = segments[i].get("voice_id") if i < len(segments) else "21m00Tcm4TlvDq8ikWAM"
             
-            # Clean Voice ID
+            # [CRITICAL FIX] Clean Voice ID to remove [brackets] or spaces
             if voice_id:
                 voice_id = voice_id.strip(" []'\"")
 
@@ -566,7 +577,7 @@ def background_generate_video(self, form_data: dict):
         
         final_pairs = []
         
-        # Parallel Execution
+        # Parallel Execution (Workers=2 for safety)
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_to_asset = {
                 executor.submit(
@@ -639,10 +650,11 @@ def background_generate_video(self, form_data: dict):
         update_status("Uploading & Finalizing...")
         final_video_url = safe_upload_to_cloudinary(final_output_path, folder="final_videos")
         
-        # [FIX] These functions are now defined above
+        # [RESTORED] These functions are now defined above
         thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
         metadata = youtube_metadata_agent(full_script_text, keyword, form_data, blueprint)
 
+        # Cleanup
         try:
             if music_path and os.path.exists(music_path): os.remove(music_path)
             if os.path.exists(temp_visual_path): os.remove(temp_visual_path)
