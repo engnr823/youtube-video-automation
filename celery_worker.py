@@ -27,7 +27,11 @@ from celery_init import celery
 # AI Clients
 from openai import OpenAI
 import replicate
-from elevenlabs import VoiceSettings # Needed for voice stability fix
+# Import VoiceSettings to fix nasal voice issues
+try:
+    from elevenlabs import VoiceSettings
+except ImportError:
+    VoiceSettings = None
 
 # --- UTILS IMPORT SAFETY BLOCK ---
 try:
@@ -227,7 +231,6 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
 
         with open(input_list_path, "w") as f:
             for chunk in chunk_paths:
-                # Escape filename safely
                 abs_path = os.path.abspath(chunk).replace("'", "'\\''")
                 f.write(f"file '{abs_path}'\n")
 
@@ -273,12 +276,21 @@ def scrape_youtube_videos(keyword: str, provider: str = "scrapingbee", max_resul
 def analyze_competitors(scraped_videos: List[dict]) -> Dict[str, Any]:
     return {"hook_style": "intrigue", "avg_scene_count": 6, "tone": "motivational"}
 
+# [FIX] OpenAI Function updated to strictly force JSON compliance
 def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: bool = False) -> str:
     if not openai_client: raise RuntimeError("OpenAI client not configured")
     try:
+        # Strict System Prompt
+        system_content = "You are a professional screenwriter."
+        if is_json:
+            system_content += " You must output valid JSON."
+
         completion = openai_client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL","gpt-4o"),
-            messages=[{"role":"system","content":"You are a professional screenwriter."},{"role":"user","content":prompt_content}],
+            messages=[
+                {"role":"system","content": system_content},
+                {"role":"user","content":prompt_content}
+            ],
             temperature=temperature,
             response_format={"type": "json_object"} if is_json else {"type": "text"}
         )
@@ -434,7 +446,7 @@ def process_single_scene(
             # Generate new scenery for B-Roll
             visual_setting = scene.get("visual_prompt", "")
             full_prompt = f"{visual_setting}, cinematic lighting, 8k, photorealistic"
-            if not is_cinematic_shot: # If talking but no ref image, mention char
+            if not is_cinematic_shot: 
                 full_prompt = f"{character_profile}, {full_prompt}"
             
             keyframe_url = generate_flux_image(full_prompt, aspect=aspect)
