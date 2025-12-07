@@ -125,10 +125,19 @@ class StoryboardSchema(BaseModel):
     characters: Optional[List[dict]] = []
     scenes: List[SceneSchema]
 
-# -------------------------
-# CHARACTER DATABASE
-# -------------------------
+# --- CHARACTER DATABASE & VOICE MAPPING ---
 CHAR_DB_PATH = os.getenv("CHAR_DB_PATH", "/var/data/character_db.json")
+
+# --- NEW: VOICE MAPPING FOR DIVERSE DIALOGUE ---
+# These are example IDs. Replace with your actual ElevenLabs or custom IDs.
+# The `generate_audio_robust` function will attempt to match these to OpenAI's 'alloy'/'nova'/'onyx' if ElevenLabs fails.
+VOICE_MAPPING = {
+    "MALE_1": "pqHfZKP75CvOlQylNhV4", # Your current voice (assumed male)
+    "FEMALE_1": "E1I8m3QzU5nF1A7W2ePq", # Placeholder for a distinct Female voice
+    "NARRATOR": "21m00Tcm4wOz0p8WlS9e", # Placeholder for a dedicated Narrator/Neutral voice
+    "KABIR": "pqHfZKP75CvOlQylNhV4", # Mapping main characters for clarity
+    "ZARA": "E1I8m3QzU5nF1A7W2ePq"
+}
 
 def ensure_dir(path: str):
     Path(path).mkdir(parents=True, exist_ok=True)
@@ -160,7 +169,7 @@ def load_prompt_template(filename: str) -> str:
     with open(path, "r", encoding="utf-8") as f: return f.read()
 
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3),
-       retry=retry_if_exception_type(requests.exceptions.RequestException))
+        retry=retry_if_exception_type(requests.exceptions.RequestException))
 def download_to_file(url: str, dest_path: str, timeout: int = 300):
     logging.info(f"Downloading {url} -> {dest_path}")
     with requests.get(url, stream=True, timeout=timeout) as r:
@@ -250,9 +259,13 @@ def replicate_run_safe(model_name: str, **kwargs) -> Optional[str]:
 # -------------------------
 # AI GENERATORS
 # -------------------------
-def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
+# Modified to accept optional seed
+def generate_flux_image(prompt: str, aspect: str = "16:9", seed: Optional[int] = None) -> str:
     model_name = "black-forest-labs/flux-schnell"
     input_payload = {"prompt": prompt, "aspect_ratio": aspect, "output_format": "jpg"}
+    if seed is not None:
+        input_payload["seed"] = seed
+        
     for i in range(2):
         try: return str(replicate_run_safe(model_name, input=input_payload))
         except: time.sleep(1)
@@ -262,27 +275,33 @@ def generate_audio_robust(text: str, voice_id: str) -> str:
     # 1. ElevenLabs
     if ELEVENLABS_AVAILABLE and generate_audio_for_scene:
         try:
+            logging.info(f"🎙️ Generating audio for voice_id={voice_id}, attempt 1...")
             res = generate_audio_for_scene(text, voice_id)
             if res and isinstance(res, dict) and res.get("path"): return res["path"]
         except: pass
-    # 2. OpenAI
+    # 2. OpenAI (Fallback)
     if openai_client:
         try:
             safe_id = str(uuid.uuid4())
             output_path = os.path.join(tempfile.gettempdir(), f"openai_audio_{safe_id}.mp3")
+            
+            # OpenAI Voice Mapping based on provided voice_id/name
             v_lower = (voice_id or "").lower()
-            openai_voice = "alloy"
-            if "male" in v_lower: openai_voice = "onyx"
-            elif "female" in v_lower: openai_voice = "nova"
+            openai_voice = "alloy" # Default Male
+            if "female" in v_lower or "zara" in v_lower or v_lower == VOICE_MAPPING.get("FEMALE_1").lower(): openai_voice = "nova"
+            elif "male" in v_lower or "kabir" in v_lower or v_lower == VOICE_MAPPING.get("MALE_1").lower(): openai_voice = "onyx"
+            elif "narrator" in v_lower: openai_voice = "echo" # Neutral/Narrator
+            
             response = openai_client.audio.speech.create(model="tts-1", voice=openai_voice, input=text)
             response.stream_to_file(output_path)
+            logging.info(f"✅ Audio generated (OpenAI fallback): {output_path}")
             return output_path
         except Exception as e: logging.error(f"OpenAI TTS failed: {e}")
 
     raise RuntimeError("All audio generation methods failed.")
 
 # -------------------------
-# SCENE PROCESSING
+# SCENE PROCESSING (Updated for Consistency & Motion)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -302,11 +321,13 @@ def process_single_scene(
         target_face_url = None
         visual_prompt = (scene.get("visual_prompt") or "").lower()
 
-        # Face matching
+        # Face matching: Find the first character whose name is in the prompt
         for char_name, face_url in character_faces.items():
             if char_name.lower() in visual_prompt:
                 target_face_url = face_url
                 break
+        
+        # Fallback: Use the first available character face if no name is matched in the prompt
         if not target_face_url and character_faces:
             target_face_url = list(character_faces.values())[0]
 
@@ -316,32 +337,49 @@ def process_single_scene(
 
         video_url = None
 
-        # 1. Lip Sync (Using Reliable Model: cjwbw/sadtalker)
+        # 1. Lip Sync (Use Sadtalker for close-ups with dialogue)
         if has_dialogue and target_face_url and not is_wide:
             try:
+                # Sadtalker needs a public image URL. If it's a local path from a fresh cast, upload it.
+                if not target_face_url.startswith("http"):
+                    cloud_image_url = safe_upload_to_cloudinary(target_face_url, resource_type="image", folder="temp_face")
+                else:
+                    cloud_image_url = target_face_url
+                
                 cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
                 
                 model_name = "cjwbw/sadtalker:a519cc0cfebaaeade068b23899165a11ec76aaa1d2b313d40d214f204ec957a3"
                 input_payload = {
-                    "source_image": target_face_url,
+                    "source_image": cloud_image_url, # Use consistent image
                     "driven_audio": cloud_audio_url,
-                    "still_mode": True,
+                    "still_mode": True, # Still mode is required for consistency in Sadtalker
                     "use_enhancer": True,
                     "preprocess": "full"
                 }
                 raw = replicate_client.run(model_name, input=input_payload)
                 video_url = normalize_replicate_output(raw)
+                logging.info(f"✅ Scene {index} generated with Sadtalker (Lip Sync)")
             except Exception as e:
-                logging.error(f"Lip-sync failed: {e}")
+                logging.error(f"Lip-sync failed: {traceback.format_exc()}")
+                video_url = None # Fallback to Cinematic if lip-sync fails
 
-        # 2. Cinematic (Wan Video)
+        # 2. Cinematic Video Generation (Wan Video)
         if not video_url:
-            action = f"{scene.get('action_prompt','cinematic movement')}, camera:{scene.get('camera_angle','35mm')}"
+            # Inject a strong motion/camera movement prompt to avoid static images
+            motion_prompt = f"ACTION: {scene.get('action_prompt','dramatic tension, slight head turn, slight camera dolly movement')}, SHOT:{scene.get('shot_type','medium')}, CAMERA:{scene.get('camera_angle','35mm')}, LIGHTING:{scene.get('lighting','soft cinematic')}, MOTION: **dynamic camera movement**, **slow zoom and pan**"
+            
             try:
                 model_name = "wan-video/wan-2.1-1.3b"
-                input_payload = {"prompt": f"{visual_prompt}, {action}", "aspect_ratio": aspect}
-                if target_face_url: input_payload["image"] = target_face_url # CRITICAL for consistency
+                input_payload = {"prompt": f"{visual_prompt}, {motion_prompt}", "aspect_ratio": aspect}
+                
+                # CRITICAL for face consistency in Wan-Video: pass the reference image
+                if target_face_url: 
+                    if not target_face_url.startswith("http"):
+                         target_face_url = safe_upload_to_cloudinary(target_face_url, resource_type="image", folder="temp_face")
+                    input_payload["image"] = target_face_url 
+                    
                 video_url = replicate_run_safe(model_name, input=input_payload)
+                logging.info(f"✅ Scene {index} generated with Wan-Video")
             except Exception as e:
                 logging.error(f"Cinematic failed: {e}")
 
@@ -451,20 +489,53 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
         uploaded_assets_context="User uploaded images present" if form_data.get("uploaded_images") else "No uploads",
         max_scenes=str(target_scenes)
     )
-    prompt += f"\n\nIMPORTANT: The 'audio_narration' MUST be at least 150 words. Generate {target_scenes} scenes."
+    # CRITICAL: Instruct LLM to include speaker tags for multi-voice support
+    prompt += f"\n\nIMPORTANT: The 'audio_narration' MUST be at least 150 words. GENERATE {target_scenes} scenes. For dialogue, explicitly start the narration with the character name followed by a colon (e.g., KABIR: Hello. ZARA: Hi.)."
     raw = get_openai_response(prompt, temperature=0.6, is_json=True)
     obj = extract_json_from_text(raw) or (json.loads(raw) if raw else {})
     if not obj: raise RuntimeError("Storyboard generation failed")
     try: return StoryboardSchema(**obj).dict()
     except ValidationError: return {"video_title": "Untitled", "scenes": obj.get("scenes", []), "characters": obj.get("characters", [])}
 
+# Function to assign dynamic voice IDs based on character names in the narration (REPLACED)
 def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
     scenes = storyboard.get('scenes', [])
     segments = []
-    main_voice = form_data.get("voice_selection") or "neutral"
+    
+    # Extract defined characters from the storyboard for matching
+    character_names = [char.get('name').upper() for char in storyboard.get('characters', []) if char.get('name')]
+    
     for s in scenes:
         text = s.get("audio_narration", "")
-        segments.append({"text": text, "voice_id": main_voice})
+        
+        # Default voice: use the user's preference if provided, otherwise the Narrator
+        assigned_voice = form_data.get("voice_selection") or VOICE_MAPPING.get("NARRATOR")
+        
+        # 1. Attempt to find a direct speaker tag (e.g., "KABIR: I cannot...")
+        speaker_match = None
+        for name in character_names:
+            name_upper = name.upper()
+            
+            # Check for speaker tag at the start (e.g., "KABIR: ")
+            if text.upper().startswith(f"{name_upper}:"):
+                speaker_match = name_upper
+                # Clean up the text: remove "KABIR: " from the start
+                text = text[len(name_upper)+1:].strip()
+                break
+            
+        if speaker_match:
+            # Assign specific voice ID for the matched character
+            assigned_voice = VOICE_MAPPING.get(speaker_match, assigned_voice)
+            
+        elif text and len(character_names) >= 2:
+            # Fallback for untagged dialogue (Alternating Heuristic for two-person scenes)
+            char_index = s.get('scene_id', 0) % 2 
+            # Use the voice ID corresponding to the character name
+            speaker_name = character_names[char_index]
+            assigned_voice = VOICE_MAPPING.get(speaker_name, assigned_voice)
+        
+        segments.append({"text": text, "voice_id": assigned_voice})
+        
     return segments
 
 def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Optional[str]:
@@ -523,14 +594,20 @@ def background_generate_video(self, form_data: dict):
             ensure_character(name) 
             if name not in character_faces:
                 desc = char.get("appearance_prompt") or f"Cinematic portrait of {name}"
-                # CRITICAL FIX: Prompt for consistent attire (jacket/style)
-                casting_prompt = f"Professional portrait of {name}, {desc}, **wearing a dark leather jacket**, perfectly frontal, neutral expression, centered, 8k, cinematic lighting"
+                
+                # CRITICAL FIX: Prompt for consistent attire and unique style
+                casting_prompt = f"Professional portrait of {name}, {desc}, **wearing a dark leather jacket**, perfectly frontal, neutral expression, centered, 8k, cinematic lighting, **highly detailed facial features**"
+                
+                # NEW: Use a deterministic seed to generate the casting image once
+                casting_seed = abs(hash(name)) % 100000 
+
                 try:
-                    character_faces[name] = generate_flux_image(casting_prompt, aspect=aspect)
+                    # Pass the seed to the image generation function
+                    character_faces[name] = generate_flux_image(casting_prompt, aspect=aspect, seed=casting_seed)
                 except Exception as e:
                     logging.error(f"Casting failed for {name}: {e}")
 
-        # 3. Audio
+        # 3. Audio (Now Multi-Voice)
         update_status("Synthesizing Audio Dialogue...")
         segments = refine_script_with_roles(storyboard, form_data)
         scene_assets = []
@@ -549,7 +626,7 @@ def background_generate_video(self, form_data: dict):
 
         if not scene_assets: raise RuntimeError("Audio generation failed for all scenes.")
 
-        # 4. Rendering
+        # 4. Rendering (Now with Motion/Consistency Logic)
         update_status("Rendering Video Scenes (Synced)...")
         final_pairs = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -571,7 +648,7 @@ def background_generate_video(self, form_data: dict):
 
         if not final_pairs: raise RuntimeError("Video generation failed (no scenes).")
 
-        # 5. Stitching
+        # 5. Stitching (Now with Music Mix Fix)
         update_status("Final Assembly...")
         
         music_url = random.choice(ALL_MUSIC_URLS)
@@ -586,16 +663,33 @@ def background_generate_video(self, form_data: dict):
              return {"status": "error", "message": "Video stitching failed. Please try again."}
 
         if music_path:
-            # [CRITICAL FIX] Increased volume from 0.15 to 0.40
+            # --- NEW CRITICAL FIX: LOUDNESS NORMALIZATION AND MUSIC MIXING ---
             cmd = [
-                "ffmpeg", "-y", "-i", temp_visual_path, "-stream_loop", "-1", "-i", music_path,
-                "-filter_complex", "[1:a]volume=0.40[bg];[0:a][bg]amix=inputs=2:duration=first[outa]",
+                "ffmpeg", "-y", 
+                "-i", temp_visual_path, 
+                "-stream_loop", "-1", "-i", music_path, 
+                
+                # Filter Complex:
+                "-filter_complex", 
+                # [0:a] is dialogue. Apply loudnorm to dialogue to hit target loudness
+                "[0:a]loudnorm=I=-14:LRA=7:tp=-2,volume=0.9[dia];" 
+                # [1:a] is music. Apply loudnorm to music to a lower background level.
+                "[1:a]loudnorm=I=-22:LRA=7:tp=-2[bg];" 
+                # Amix: Mix dialogue [dia] and background music [bg]
+                "[dia][bg]amix=inputs=2:duration=first:weights=1 1[outa]", 
+                
+                # Mapping and Encoding:
                 "-map", "0:v", "-map", "[outa]",
-                "-c:v", "libx264", "-vf", "scale='min(720,iw)':-2", "-preset", "ultrafast", "-crf", "28",
-                "-c:a", "aac", "-shortest", final_output_path
+                "-c:v", "libx264", 
+                "-vf", "scale='min(720,iw)':-2", 
+                "-preset", "fast", # Changed from ultrafast to fast for better quality
+                "-crf", "23", # Changed from 28 to 23 for better quality
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest", final_output_path
             ]
             subprocess.run(cmd, check=True)
         else:
+            # If no music, copy the visual track to the final path
             shutil.move(temp_visual_path, final_output_path)
 
         # 6. Upload
@@ -622,4 +716,5 @@ def background_generate_video(self, form_data: dict):
         }
 
     except Exception as e:
+        logging.error(f"Task failed with critical error: {traceback.format_exc()}")
         return {"status": "error", "message": str(e)}
