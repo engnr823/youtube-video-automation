@@ -87,22 +87,18 @@ else:
 # -------------------------
 # ROYALTY-FREE MUSIC LIBRARY (EXPANDED & SHUFFLED)
 # -------------------------
-# This list is used for random selection (shuffling)
 ALL_MUSIC_URLS = [
-    # Original Tracks
-    "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3", # Motivational/Default
-    "https://cdn.pixabay.com/download/audio/2021/11/24/audio_8243a76035.mp3", # Sad
-    "https://cdn.pixabay.com/download/audio/2022/03/24/audio_07b04b67e0.mp3", # Intense
-    "https://cdn.pixabay.com/download/audio/2022/01/18/audio_d0a13f69d2.mp3", # Happy
-    
-    # Added Diverse/Viral-Style Tracks for Shuffling
-    "https://cdn.pixabay.com/audio/2022/07/22/powerful-8526.mp3", # Epic/Powerful
-    "https://cdn.pixabay.com/audio/2022/07/26/cinematic-ambient-11634.mp3", # Cinematic Ambient
-    "https://cdn.pixabay.com/audio/2022/10/25/the-future-is-now-12499.mp3", # Viral Electronic/Tech
-    "https://cdn.pixabay.com/audio/2023/07/11/lo-fi-149024.mp3", # Lofi/Chill
-    "https://cdn.pixabay.com/audio/2022/04/27/fantasy-10878.mp3", # Fantasy/Epic
-    "https://cdn.pixabay.com/audio/2022/09/20/emotional-128225.mp3", # New Emotional Piano
-    "https://cdn.pixabay.com/audio/2023/12/06/trailer-mood-176840.mp3" # Dark Trailer Mood
+    "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3",
+    "https://cdn.pixabay.com/download/audio/2021/11/24/audio_8243a76035.mp3",
+    "https://cdn.pixabay.com/audio/2022/03/24/audio_07b04b67e0.mp3",
+    "https://cdn.pixabay.com/audio/2022/01/18/audio_d0a13f69d2.mp3",
+    "https://cdn.pixabay.com/audio/2022/07/22/powerful-8526.mp3", 
+    "https://cdn.pixabay.com/audio/2022/07/26/cinematic-ambient-11634.mp3", 
+    "https://cdn.pixabay.com/audio/2022/10/25/the-future-is-now-12499.mp3", 
+    "https://cdn.pixabay.com/audio/2023/07/11/lo-fi-149024.mp3", 
+    "https://cdn.pixabay.com/audio/2022/04/27/fantasy-10878.mp3", 
+    "https://cdn.pixabay.com/audio/2022/09/20/emotional-128225.mp3", 
+    "https://cdn.pixabay.com/audio/2023/12/06/trailer-mood-176840.mp3"
 ]
 
 # -------------------------
@@ -233,7 +229,7 @@ def get_latest_model_version_id(model_name: str) -> Optional[str]:
         model = replicate_client.models.get(model_name)
         versions = model.versions.list()
         if not versions: return None
-        return versions[0].id if hasattr(versions[0], "id") else str(versions[0])
+        return versions[0].id if versions else str(versions[0])
     except Exception as e:
         logging.warning(f"Unable to fetch versions for {model_name}: {e}")
         return None
@@ -282,6 +278,7 @@ def generate_audio_robust(text: str, voice_id: str) -> str:
             response.stream_to_file(output_path)
             return output_path
         except Exception as e: logging.error(f"OpenAI TTS failed: {e}")
+
     raise RuntimeError("All audio generation methods failed.")
 
 # -------------------------
@@ -319,10 +316,11 @@ def process_single_scene(
 
         video_url = None
 
-        # 1. Lip Sync
+        # 1. Lip Sync (Using Reliable Model: cjwbw/sadtalker)
         if has_dialogue and target_face_url and not is_wide:
             try:
                 cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
+                
                 model_name = "cjwbw/sadtalker:a519cc0cfebaaeade068b23899165a11ec76aaa1d2b313d40d214f204ec957a3"
                 input_payload = {
                     "source_image": target_face_url,
@@ -342,7 +340,7 @@ def process_single_scene(
             try:
                 model_name = "wan-video/wan-2.1-1.3b"
                 input_payload = {"prompt": f"{visual_prompt}, {action}", "aspect_ratio": aspect}
-                if target_face_url: input_payload["image"] = target_face_url # Image-to-Video Mode
+                if target_face_url: input_payload["image"] = target_face_url # CRITICAL for consistency
                 video_url = replicate_run_safe(model_name, input=input_payload)
             except Exception as e:
                 logging.error(f"Cinematic failed: {e}")
@@ -379,21 +377,13 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                 chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
                 audio_dur = get_media_duration(audio)
                 
-                # [FIX] Force min duration 2s to prevent ffmpeg crash on short clips
                 target_dur = max(audio_dur, 2.0)
                 
-                # FFmpeg Command with Padding (apad)
                 cmd = [
-                    "ffmpeg", "-y", 
-                    "-stream_loop", "-1", "-i", video, 
-                    "-i", audio,
-                    "-t", str(target_dur), 
-                    "-map", "0:v", "-map", "1:a",
+                    "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
+                    "-t", str(target_dur), "-map", "0:v", "-map", "1:a",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
-                    "-c:a", "aac", 
-                    "-af", "apad", # Pad silence if audio is shorter than video
-                    "-shortest", 
-                    chunk_name
+                    "-c:a", "aac", "-af", "apad", "-shortest", chunk_name
                 ]
                 subprocess.run(cmd, check=True, capture_output=True)
                 chunk_paths.append(chunk_name)
@@ -402,8 +392,7 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                 logging.error(f"Failed to stitch chunk {i}: {e}. Skipping.")
                 continue
 
-        if not chunk_paths: 
-            return False
+        if not chunk_paths: return False
 
         with open(input_list_path, "w") as f:
             for chunk in chunk_paths:
@@ -416,9 +405,7 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
         ], check=True, capture_output=True)
         return True
 
-    except Exception as e:
-        logging.error(f"Stitching error: {e}")
-        return False
+    except Exception as e: return False
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 
@@ -435,9 +422,7 @@ def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: 
             response_format={"type": "json_object"} if is_json else {"type": "text"}
         )
         return completion.choices[0].message.content or ""
-    except Exception as e:
-        logging.error(f"OpenAI error: {e}")
-        return "{}" if is_json else ""
+    except Exception as e: return "{}" if is_json else ""
 
 def scrape_youtube_videos(keyword: str, provider: str = "scrapingbee") -> List[dict]:
     if provider == "scrapingbee" and SCRAPINGBEE_API_KEY:
@@ -522,7 +507,7 @@ def background_generate_video(self, form_data: dict):
         scenes = storyboard.get("scenes", [])
         if not scenes: raise RuntimeError("Failed to generate scenes.")
 
-        # 2. Casting
+        # 2. Casting (IMPROVED for Sync/Consistency)
         update_status("Casting Characters...")
         characters = storyboard.get("characters", [])
         uploaded_images = form_data.get("uploaded_images") or []
@@ -538,8 +523,10 @@ def background_generate_video(self, form_data: dict):
             ensure_character(name) 
             if name not in character_faces:
                 desc = char.get("appearance_prompt") or f"Cinematic portrait of {name}"
+                # CRITICAL FIX: Prompt for consistent attire (jacket/style)
+                casting_prompt = f"Professional portrait of {name}, {desc}, **wearing a dark leather jacket**, perfectly frontal, neutral expression, centered, 8k, cinematic lighting"
                 try:
-                    character_faces[name] = generate_flux_image(f"{desc}, 8k", aspect=aspect)
+                    character_faces[name] = generate_flux_image(casting_prompt, aspect=aspect)
                 except Exception as e:
                     logging.error(f"Casting failed for {name}: {e}")
 
@@ -587,7 +574,6 @@ def background_generate_video(self, form_data: dict):
         # 5. Stitching
         update_status("Final Assembly...")
         
-        # [NEW LOGIC] Randomly select music URL from the expanded list
         music_url = random.choice(ALL_MUSIC_URLS)
         music_path = os.path.join(tempfile.gettempdir(), f"music_{uuid.uuid4()}.mp3")
         try: download_to_file(music_url, music_path)
@@ -600,9 +586,10 @@ def background_generate_video(self, form_data: dict):
              return {"status": "error", "message": "Video stitching failed. Please try again."}
 
         if music_path:
+            # [CRITICAL FIX] Increased volume from 0.15 to 0.40
             cmd = [
                 "ffmpeg", "-y", "-i", temp_visual_path, "-stream_loop", "-1", "-i", music_path,
-                "-filter_complex", "[1:a]volume=0.15[bg];[0:a][bg]amix=inputs=2:duration=first[outa]",
+                "-filter_complex", "[1:a]volume=0.40[bg];[0:a][bg]amix=inputs=2:duration=first[outa]",
                 "-map", "0:v", "-map", "[outa]",
                 "-c:v", "libx264", "-vf", "scale='min(720,iw)':-2", "-preset", "ultrafast", "-crf", "28",
                 "-c:a", "aac", "-shortest", final_output_path
@@ -617,11 +604,11 @@ def background_generate_video(self, form_data: dict):
         thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
         metadata = youtube_metadata_agent(full_script_text, keyword, form_data, blueprint)
 
+        # Cleanup
         try:
             if os.path.exists(temp_visual_path): os.remove(temp_visual_path)
             for v, a in final_pairs:
-                if os.path.exists(v): 
-                    # Clean up the scene temp directory
+                if v and os.path.exists(v): 
                     parent_dir = os.path.dirname(v)
                     if "scene_" in parent_dir: shutil.rmtree(parent_dir)
         except: pass
