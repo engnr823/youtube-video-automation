@@ -465,7 +465,10 @@ def process_single_scene(
                     "driven_audio": cloud_audio_url,
                     "still": True,
                     "enhancer": "gfpgan",
-                    "preprocess": "full"
+                    "preprocess": "full",
+                    "expression_scale": 1.1,
+                    "ref_eyeblink": None,
+                    "ref_pose": None
                 }
             )
             if isinstance(video_url, list): video_url = video_url[0]
