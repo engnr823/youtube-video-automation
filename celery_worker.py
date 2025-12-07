@@ -12,7 +12,7 @@ import subprocess
 import random
 import time
 from string import Template
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 
 import requests
@@ -28,18 +28,15 @@ from celery_init import celery
 from openai import OpenAI
 import replicate
 
-# --- UTILS IMPORT (Crucial for SaaS Sync) ---
+# --- UTILS IMPORT ---
 try:
-    from utils.ffmpeg_utils import stitch_video_audio_pairs, get_media_duration
+    from utils.ffmpeg_utils import get_media_duration
 except ImportError:
-    logging.error("🔴 CRITICAL: utils.ffmpeg_utils missing SaaS functions. Please update that file first.")
-    # Dummy fallbacks to prevent immediate import crash, but logic will fail
-    def stitch_video_audio_pairs(*args, **kwargs): raise NotImplementedError("Update ffmpeg_utils")
+    # Fallback if utils file is missing
     def get_media_duration(*args, **kwargs): return 5.0
 
 # --- CLIENT IMPORT SAFETY BLOCK ---
 try:
-    # We now import 'generate_audio_for_scene' for precise syncing
     from video_clients.elevenlabs_client import (
         generate_voiceover_and_upload, 
         generate_multi_voice_audio,
@@ -50,7 +47,6 @@ except ImportError:
     generate_audio_for_scene = None
 
 try:
-    # [UPDATED] Imported Lip-Sync function here
     from video_clients.replicate_client import (
         generate_video_scene_with_replicate, 
         generate_lip_sync_with_replicate
@@ -59,7 +55,6 @@ except ImportError:
     logging.warning("⚠️ Replicate client not found. Video generation will fail.")
     generate_video_scene_with_replicate = None
     generate_lip_sync_with_replicate = None
-# ----------------------------------
 
 # -------------------------
 # Configuration
@@ -175,6 +170,76 @@ def extract_json_list_from_text(text: str) -> Optional[list]:
         try: return json.loads(text[start:end+1])
         except: pass
     return None
+
+# -------------------------
+# LOW-MEMORY VIDEO STITCHER (Fixes SIGKILL Crash)
+# -------------------------
+def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
+    """
+    Local optimized version of stitching to prevent OOM kills.
+    Uses 'ultrafast' preset and 'crf 28' to minimize RAM usage.
+    """
+    request_id = str(uuid.uuid4())
+    temp_dir = os.path.join("/tmp", f"render_{request_id}")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    input_list_path = os.path.join(temp_dir, "inputs.txt")
+    chunk_paths = []
+
+    try:
+        logging.info(f"Processing {len(scene_pairs)} pairs for Request ID: {request_id}")
+
+        # 1. Process chunks (Sync Video length to Audio length)
+        for i, (video, audio) in enumerate(scene_pairs):
+            chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
+            
+            audio_dur = get_media_duration(audio)
+            if audio_dur == 0:
+                logging.warning(f"Audio duration is 0 for {audio}, skipping chunk.")
+                continue
+
+            # COMMAND OPTIMIZED FOR LOW MEMORY ENVIRONMENTS
+            cmd = [
+                "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
+                "-t", str(audio_dur), 
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "libx264", 
+                "-pix_fmt", "yuv420p", 
+                "-preset", "ultrafast",  # <--- CHANGED: Uses minimal RAM
+                "-crf", "28",            # <--- ADDED: Slightly lower quality to save RAM
+                "-c:a", "aac", 
+                "-shortest",
+                chunk_name
+            ]
+            
+            subprocess.run(cmd, check=True, capture_output=True)
+            chunk_paths.append(chunk_name)
+
+        # 2. Write the Concat List
+        with open(input_list_path, "w") as f:
+            for chunk in chunk_paths:
+                abs_path = os.path.abspath(chunk).replace("'", "'\\''")
+                f.write(f"file '{abs_path}'\n")
+
+        # 3. Concatenate Chunks
+        logging.info("Concatenating chunks...")
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", 
+            "-i", input_list_path, "-c", "copy", output_path
+        ], check=True, capture_output=True)
+
+        logging.info(f"✅ Video successfully saved to {output_path}")
+        return True
+
+    except subprocess.CalledProcessError as e:
+        logging.error(f"FFmpeg failed: {e}")
+        return False
+    except Exception as e:
+        logging.error(f"General stitching error: {e}")
+        return False
+    finally:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
 
 # -------------------------
 # Scraping & Storyboard
@@ -557,32 +622,31 @@ def background_generate_video(self, form_data: dict):
         except:
             music_path = None # Proceed without music if fail
 
-        # Stitch
+        # Stitch - USING OPTIMIZED LOCAL FUNCTION
         final_output_path = f"/tmp/final_render_{task_id}.mp4"
         
-        # Note: We stitch the video/audio pairs using our helper, then add music
-        # To add music, we need a 2-step process or a complex ffmpeg command.
-        # For simplicity/reliability: Stitch V+A first. Then add background music.
-        
-        # Step A: Stitch Scenes
+        # Step A: Stitch Scenes using the new LOW-MEMORY function
         temp_visual_path = f"/tmp/visual_base_{task_id}.mp4"
-        success = stitch_video_audio_pairs(final_pairs, temp_visual_path)
+        
+        # [CRITICAL FIX] Use local optimized function instead of imported one
+        success = stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path)
         
         if not success:
             raise RuntimeError("Stitching failed.")
         
         # Step B: Add Background Music (Ducking)
         if music_path:
+            # [CRITICAL FIX] Added -preset ultrafast and -crf 28 here too
             cmd = [
                 "ffmpeg", "-y",
                 "-i", temp_visual_path,
                 "-stream_loop", "-1", "-i", music_path,
                 "-filter_complex", "[1:a]volume=0.15[bg];[0:a][bg]amix=inputs=2:duration=first[outa]",
                 "-map", "0:v", "-map", "[outa]",
-                "-c:v", "copy", "-c:a", "aac", "-shortest",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", # Low Memory settings
+                "-c:a", "aac", "-shortest",
                 final_output_path
             ]
-            # [UPDATED] Replaced missing run_subprocess with standard subprocess.run
             subprocess.run(cmd, check=True)
         else:
             # No music, just rename
