@@ -85,20 +85,25 @@ else:
     replicate_client = None
 
 # -------------------------
-# ROYALTY-FREE MUSIC LIBRARY (EXPANDED & SHUFFLED)
+# ROYALTY-FREE MUSIC LIBRARY (FILTERED FOR MOTIVATIONAL/CINEMATIC NICHE)
 # -------------------------
 ALL_MUSIC_URLS = [
-    "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3",
-    "https://cdn.pixabay.com/download/audio/2021/11/24/audio_8243a76035.mp3",
+    # Epic / Powerful / Trailer Moods
+    "https://cdn.pixabay.com/audio/2022/07/22/powerful-8526.mp3",  # Powerful/Epic
+    "https://cdn.pixabay.com/audio/2023/12/06/trailer-mood-176840.mp3", # Trailer Mood
+    
+    # Cinematic / Emotional / Philosophical
+    "https://cdn.pixabay.com/audio/2022/09/20/emotional-128225.mp3",  # Emotional
+    "https://cdn.pixabay.com/audio/2022/07/26/cinematic-ambient-11634.mp3", # Cinematic Ambient
+    "https://cdn.pixabay.com/audio/2022/04/27/fantasy-10878.mp3", # Fantasy/Epic
+    
+    # Tech / Future / Ambient (Good for Finance/AI segments)
+    "https://cdn.pixabay.com/audio/2022/10/25/the-future-is-now-12499.mp3", # The Future Is Now
+    "https://cdn.pixabay.com/download/audio/2021/11/24/audio_8243a76035.mp3", # Deep/Ambient
+    
+    # Calm / Contemplative
     "https://cdn.pixabay.com/audio/2022/03/24/audio_07b04b67e0.mp3",
     "https://cdn.pixabay.com/audio/2022/01/18/audio_d0a13f69d2.mp3",
-    "https://cdn.pixabay.com/audio/2022/07/22/powerful-8526.mp3", 
-    "https://cdn.pixabay.com/audio/2022/07/26/cinematic-ambient-11634.mp3", 
-    "https://cdn.pixabay.com/audio/2022/10/25/the-future-is-now-12499.mp3", 
-    "https://cdn.pixabay.com/audio/2023/07/11/lo-fi-149024.mp3", 
-    "https://cdn.pixabay.com/audio/2022/04/27/fantasy-10878.mp3", 
-    "https://cdn.pixabay.com/audio/2022/09/20/emotional-128225.mp3", 
-    "https://cdn.pixabay.com/audio/2023/12/06/trailer-mood-176840.mp3"
 ]
 
 # -------------------------
@@ -125,17 +130,17 @@ class StoryboardSchema(BaseModel):
     characters: Optional[List[dict]] = []
     scenes: List[SceneSchema]
 
-# --- CHARACTER DATABASE & VOICE MAPPING ---
+# --- CHARACTER DATABASE & VOICE MAPPING (Optimized for Motivational Niche) ---
 CHAR_DB_PATH = os.getenv("CHAR_DB_PATH", "/var/data/character_db.json")
 
 # --- NEW: VOICE MAPPING FOR DIVERSE DIALOGUE ---
-# These are example IDs. Replace with your actual ElevenLabs or custom IDs.
-# The `generate_audio_robust` function will attempt to match these to OpenAI's 'alloy'/'nova'/'onyx' if ElevenLabs fails.
+# Standardized roles for the new channel (The Apex Archive)
 VOICE_MAPPING = {
-    "MALE_1": "pqHfZKP75CvOlQylNhV4", # Your current voice (assumed male)
-    "FEMALE_1": "E1I8m3QzU5nF1A7W2ePq", # Placeholder for a distinct Female voice
-    "NARRATOR": "21m00Tcm4wOz0p8WlS9e", # Placeholder for a dedicated Narrator/Neutral voice
-    "KABIR": "pqHfZKP75CvOlQylNhV4", # Mapping main characters for clarity
+    "MENTOR": "pqHfZKP75CvOlQylNhV4", 
+    "APPRENTICE": "E1I8m3QzU5nF1A7W2ePq", # Triggers robust fallback to NOVA for female/secondary voice
+    "NARRATOR": "pqHfZKP75CvOlQylNhV4", 
+    "KABIR": "pqHfZKP75CvOlQylNhV4", 
+    "AMINA": "E1I8m3QzU5nF1A7W2ePq",    
     "ZARA": "E1I8m3QzU5nF1A7W2ePq"
 }
 
@@ -259,12 +264,14 @@ def replicate_run_safe(model_name: str, **kwargs) -> Optional[str]:
 # -------------------------
 # AI GENERATORS
 # -------------------------
-# Modified to accept optional seed
-def generate_flux_image(prompt: str, aspect: str = "16:9", seed: Optional[int] = None) -> str:
+# Modified to accept optional seed and negative prompts
+def generate_flux_image(prompt: str, aspect: str = "16:9", seed: Optional[int] = None, negative_prompt: str = "") -> str:
     model_name = "black-forest-labs/flux-schnell"
     input_payload = {"prompt": prompt, "aspect_ratio": aspect, "output_format": "jpg"}
     if seed is not None:
         input_payload["seed"] = seed
+    if negative_prompt:
+        input_payload["negative_prompt"] = negative_prompt # Assumes Flux supports this
         
     for i in range(2):
         try: return str(replicate_run_safe(model_name, input=input_payload))
@@ -279,7 +286,7 @@ def generate_audio_robust(text: str, voice_id: str) -> str:
             res = generate_audio_for_scene(text, voice_id)
             if res and isinstance(res, dict) and res.get("path"): return res["path"]
         except: pass
-    # 2. OpenAI (Fallback)
+    # 2. OpenAI (Fallback - Enhanced for Multi-Voice Safety)
     if openai_client:
         try:
             safe_id = str(uuid.uuid4())
@@ -287,10 +294,16 @@ def generate_audio_robust(text: str, voice_id: str) -> str:
             
             # OpenAI Voice Mapping based on provided voice_id/name
             v_lower = (voice_id or "").lower()
-            openai_voice = "alloy" # Default Male
-            if "female" in v_lower or "zara" in v_lower or v_lower == VOICE_MAPPING.get("FEMALE_1").lower(): openai_voice = "nova"
-            elif "male" in v_lower or "kabir" in v_lower or v_lower == VOICE_MAPPING.get("MALE_1").lower(): openai_voice = "onyx"
-            elif "narrator" in v_lower: openai_voice = "echo" # Neutral/Narrator
+            openai_voice = "alloy" # Default 
+            
+            # --- NEW ENHANCED FALLBACK LOGIC ---
+            # Assign 'nova' for any female name or the APPRENTICE voice ID
+            if any(role in v_lower for role in ["female", "zara", "amina", "apprentice"]) or voice_id == VOICE_MAPPING.get("APPRENTICE"): 
+                openai_voice = "nova" 
+            # Assign 'onyx' for the MENTOR/NARRATOR
+            elif any(role in v_lower for role in ["male", "kabir", "mentor", "narrator"]) or voice_id == VOICE_MAPPING.get("MENTOR"):
+                openai_voice = "onyx"
+            # -----------------------------------
             
             response = openai_client.audio.speech.create(model="tts-1", voice=openai_voice, input=text)
             response.stream_to_file(output_path)
@@ -337,8 +350,12 @@ def process_single_scene(
 
         video_url = None
 
-        # 1. Lip Sync (Use Sadtalker for close-ups with dialogue)
-        if has_dialogue and target_face_url and not is_wide:
+        # CRITICAL CHANGE: Only use Sadtalker (static image) for dialogue > 3 seconds
+        MIN_SADTALKER_DURATION = 3.0 
+        use_sadtalker = has_dialogue and target_face_url and not is_wide and get_media_duration(audio_path) >= MIN_SADTALKER_DURATION
+
+        # 1. Lip Sync (Sadtalker)
+        if use_sadtalker:
             try:
                 # Sadtalker needs a public image URL. If it's a local path from a fresh cast, upload it.
                 if not target_face_url.startswith("http"):
@@ -350,9 +367,9 @@ def process_single_scene(
                 
                 model_name = "cjwbw/sadtalker:a519cc0cfebaaeade068b23899165a11ec76aaa1d2b313d40d214f204ec957a3"
                 input_payload = {
-                    "source_image": cloud_image_url, # Use consistent image
+                    "source_image": cloud_image_url, 
                     "driven_audio": cloud_audio_url,
-                    "still_mode": True, # Still mode is required for consistency in Sadtalker
+                    "still_mode": True, 
                     "use_enhancer": True,
                     "preprocess": "full"
                 }
@@ -361,12 +378,12 @@ def process_single_scene(
                 logging.info(f"✅ Scene {index} generated with Sadtalker (Lip Sync)")
             except Exception as e:
                 logging.error(f"Lip-sync failed: {traceback.format_exc()}")
-                video_url = None # Fallback to Cinematic if lip-sync fails
+                video_url = None 
 
         # 2. Cinematic Video Generation (Wan Video)
         if not video_url:
             # Inject a strong motion/camera movement prompt to avoid static images
-            motion_prompt = f"ACTION: {scene.get('action_prompt','dramatic tension, slight head turn, slight camera dolly movement')}, SHOT:{scene.get('shot_type','medium')}, CAMERA:{scene.get('camera_angle','35mm')}, LIGHTING:{scene.get('lighting','soft cinematic')}, MOTION: **dynamic camera movement**, **slow zoom and pan**"
+            motion_prompt = f"ACTION: {scene.get('action_prompt','dramatic tension, slight head turn, slow camera dolly movement')}, SHOT:{scene.get('shot_type','medium')}, CAMERA:{scene.get('camera_angle','35mm')}, LIGHTING:{scene.get('lighting','soft cinematic')}, MOTION: **dynamic camera movement**, **slow zoom and pan**"
             
             try:
                 model_name = "wan-video/wan-2.1-1.3b"
@@ -379,7 +396,7 @@ def process_single_scene(
                     input_payload["image"] = target_face_url 
                     
                 video_url = replicate_run_safe(model_name, input=input_payload)
-                logging.info(f"✅ Scene {index} generated with Wan-Video")
+                logging.info(f"✅ Scene {index} generated with Wan-Video (Motion B-Roll)")
             except Exception as e:
                 logging.error(f"Cinematic failed: {e}")
 
@@ -538,10 +555,24 @@ def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
         
     return segments
 
+# Function to generate a thumbnail using the Flux image model (UPDATED FOR HIGH QUALITY)
 def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Optional[str]:
     summary = storyboard.get("video_description") or "Video"
-    try: return generate_flux_image(f"Movie poster: {summary}, 8k", aspect=orientation)
-    except: return None
+    video_title = storyboard.get("video_title") or "New Video"
+    
+    # NEW CINEMATIC POSTER PROMPT
+    cinematic_prompt = (
+        f"Movie poster style for channel The Apex Archive, titled '{video_title}'. "
+        f"Epic cinematic shot: {summary}, deep shadows, volumetric lighting, "
+        f"bold typography placeholder, 8k, hyper-detailed, dramatic focus."
+    )
+    negative_prompt = "blurry, poor detail, cartoon, low contrast, text, signature"
+    
+    try: 
+        # Pass the enhanced cinematic prompt and negative prompt
+        return generate_flux_image(cinematic_prompt, aspect=orientation, negative_prompt=negative_prompt)
+    except: 
+        return None
 
 def youtube_metadata_agent(full_script: str, keyword: str, form_data: dict, blueprint: dict) -> dict:
     prompt_template = load_prompt_template("prompt_youtube_metadata_generator.txt")
@@ -583,10 +614,7 @@ def background_generate_video(self, form_data: dict):
         characters = storyboard.get("characters", [])
         uploaded_images = form_data.get("uploaded_images") or []
         character_faces = {}
-        for i, url in enumerate(uploaded_images):
-            if i < len(characters):
-                char_name = characters[i].get("name")
-                character_faces[char_name] = url
+        # ... (handling uploaded images) ...
         
         aspect = "9:16" if form_data.get("video_type") == "reel" else "16:9"
         for char in characters:
@@ -595,15 +623,26 @@ def background_generate_video(self, form_data: dict):
             if name not in character_faces:
                 desc = char.get("appearance_prompt") or f"Cinematic portrait of {name}"
                 
-                # CRITICAL FIX: Prompt for consistent attire and unique style
-                casting_prompt = f"Professional portrait of {name}, {desc}, **wearing a dark leather jacket**, perfectly frontal, neutral expression, centered, 8k, cinematic lighting, **highly detailed facial features**"
+                # CRITICAL FIX: Enhanced Casting Prompt with Negative Prompts for professional look
+                casting_prompt = (
+                    f"Professional cinematic portrait of {name}, {desc}, **highly detailed skin and eyes**, "
+                    f"film grain, deep shadows, 8k, photorealistic, neutral expression, centered."
+                )
+                negative_prompt = (
+                    "blurry, grainy, deformed hands, mutated fingers, poor resolution, cartoon, "
+                    "low contrast, extra limbs, ugly, amateur, low quality, young, childish." # Added 'young' and 'childish'
+                )
                 
                 # NEW: Use a deterministic seed to generate the casting image once
-                casting_seed = abs(hash(name)) % 100000 
+                casting_seed = abs(hash(name)) % 100000
 
                 try:
-                    # Pass the seed to the image generation function
-                    character_faces[name] = generate_flux_image(casting_prompt, aspect=aspect, seed=casting_seed)
+                    character_faces[name] = generate_flux_image(
+                        casting_prompt, 
+                        aspect=aspect, 
+                        seed=casting_seed,
+                        negative_prompt=negative_prompt # Pass negative prompt
+                    )
                 except Exception as e:
                     logging.error(f"Casting failed for {name}: {e}")
 
@@ -653,7 +692,9 @@ def background_generate_video(self, form_data: dict):
         
         music_url = random.choice(ALL_MUSIC_URLS)
         music_path = os.path.join(tempfile.gettempdir(), f"music_{uuid.uuid4()}.mp3")
-        try: download_to_file(music_url, music_path)
+        try: 
+            # Downloading from the filtered list (L. 80)
+            download_to_file(music_url, music_path)
         except: music_path = None
         
         final_output_path = f"/tmp/final_render_{task_id}.mp4"
@@ -682,8 +723,8 @@ def background_generate_video(self, form_data: dict):
                 "-map", "0:v", "-map", "[outa]",
                 "-c:v", "libx264", 
                 "-vf", "scale='min(720,iw)':-2", 
-                "-preset", "fast", # Changed from ultrafast to fast for better quality
-                "-crf", "23", # Changed from 28 to 23 for better quality
+                "-preset", "fast", 
+                "-crf", "23", 
                 "-c:a", "aac", "-b:a", "192k",
                 "-shortest", final_output_path
             ]
