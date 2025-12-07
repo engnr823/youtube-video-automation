@@ -282,7 +282,6 @@ def analyze_competitors(scraped_videos: List[dict]) -> Dict[str, Any]:
 def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: bool = False) -> str:
     if not openai_client: raise RuntimeError("OpenAI client not configured")
     try:
-        # Strict System Prompt
         system_content = "You are a professional screenwriter."
         if is_json:
             system_content += " You must output valid JSON."
@@ -405,79 +404,84 @@ def generate_flux_image(prompt: str, aspect: str = "16:9") -> str:
     return str(output[0]) if isinstance(output, (list, tuple)) else str(output)
 
 # -------------------------
-# [ENHANCED] Scene Processor with "Natural Movement" Logic
+# [ENHANCED] Multi-Character Scene Processor
 # -------------------------
 def process_single_scene(
     scene: dict, 
     index: int, 
     character_profile: str, 
     audio_path: str = None,
-    reference_img_url: str = None,
+    # Now accepts a dictionary of faces: {"Ali": "http...", "Zara": "http..."}
+    character_faces: dict = {}, 
     aspect: str = "16:9"
 ) -> dict:
     """
-    Generates a scene video with Smart Logic:
-    - Wide/Drone/No-Dialogue -> Cinematic B-Roll (Wan 2.1)
-    - Close-up/Dialogue -> Natural Lip-Sync (SadTalker with Motion)
+    Generates a scene video with Smart Logic + Multi-Character Support.
     """
     try:
         # Rate Limit Buffer
         sleep_time = random.randint(5, 15)
         time.sleep(sleep_time)
 
-        # 1. Determine "Mode" (Talking vs B-Roll)
+        # 1. Who is speaking? (Visual Matching)
+        target_face_url = None
+        visual_prompt = scene.get("visual_prompt", "").lower()
+        
+        # Check if a known character is in the visual prompt
+        for char_name, face_url in character_faces.items():
+            if char_name.lower() in visual_prompt:
+                target_face_url = face_url
+                break
+        
+        # Fallback: If no specific character found, use the first one (Hero)
+        if not target_face_url and character_faces:
+            target_face_url = list(character_faces.values())[0]
+
+        # 2. Determine Mode (Talking vs B-Roll)
         shot_type = scene.get("shot_type", "medium").lower()
         has_dialogue = bool(scene.get("audio_narration") and len(scene.get("audio_narration")) > 2)
         
-        # SMART LOGIC: If it's a wide/drone shot OR no dialogue, force B-Roll.
+        # Smart Logic: Wide shots = Cinematic. Close-up = Lip Sync.
         is_cinematic_shot = "wide" in shot_type or "drone" in shot_type or "establish" in shot_type or not has_dialogue
 
-        # 2. Prepare Base Image
-        keyframe_url = None
+        # 3. Generate Video
+        video_url = None
         
+        # Case A: User uploaded video directly
         if scene.get("image_url") and str(scene.get("image_url")).endswith(".mp4"):
              temp_path = f"/tmp/user_upload_{index}_{uuid.uuid4()}.mp4"
              download_to_file(scene.get("image_url"), temp_path)
              return {"index": index, "video_path": temp_path, "status": "success"}
 
-        if scene.get("image_url"):
-            keyframe_url = scene.get("image_url")
-        elif reference_img_url and not is_cinematic_shot:
-            keyframe_url = reference_img_url 
-        else:
-            visual_setting = scene.get("visual_prompt", "")
-            full_prompt = f"{visual_setting}, cinematic lighting, 8k, photorealistic"
-            if not is_cinematic_shot: 
-                full_prompt = f"{character_profile}, {full_prompt}"
-            
-            keyframe_url = generate_flux_image(full_prompt, aspect=aspect)
-
-        # 3. Generate Video
-        video_url = None
-        
-        if not is_cinematic_shot and audio_path and generate_lip_sync_with_replicate:
+        # Case B: Lip Sync (Talking Head)
+        if not is_cinematic_shot and audio_path and generate_lip_sync_with_replicate and target_face_url:
             cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
             
-            # [FIXED] Updated Version Hash for SadTalker (Standard Version)
+            # [CRITICAL FIX] Using 'lucataco/sadtalker' which is verified public & stable
             video_url = replicate.run(
-                "cjwbw/sadtalker:3aa3dac937e567501297eb21b508e0a7b52ccf603215c04f1839818881427723",
+                "lucataco/sadtalker:85c698db7c0a66d5011435d0191bd32305a9c7499252a9041270252565697697",
                 input={
-                    "source_image": keyframe_url,
+                    "source_image": target_face_url,
                     "driven_audio": cloud_audio_url,
-                    "still": True,             # Keep True to prevent background distortion
-                    "enhancer": "gfpgan",      # Sharpen the face
-                    "preprocess": "full",      # Use full frame
-                    "expression_scale": 1.1,   # Add facial expression
-                    "ref_eyeblink": None,      # Let AI generate blinking
-                    "ref_pose": None           # Let AI generate head movement
+                    "still": True,
+                    "enhancer": "gfpgan",
+                    "preprocess": "full"
                 }
             )
             if isinstance(video_url, list): video_url = video_url[0]
             
+        # Case C: Cinematic B-Roll (Wan 2.1)
         else:
-            # Cinematic B-Roll (Wan 2.1)
             action = scene.get("action_prompt", "cinematic movement") + f", camera:{scene.get('camera_angle','35mm')}"
-            video_url = generate_video_scene_with_replicate(prompt=action, image_url=keyframe_url, aspect=aspect)
+            
+            # Use specific face if we have one, otherwise generate fresh scenery
+            start_image = target_face_url if target_face_url else None
+            
+            # If no start image, generate one using Flux
+            if not start_image:
+                start_image = generate_flux_image(f"{scene.get('visual_prompt')}, cinematic lighting, 8k", aspect=aspect)
+
+            video_url = generate_video_scene_with_replicate(prompt=action, image_url=start_image, aspect=aspect)
         
         # 4. Download Result
         temp_video_path = f"/tmp/scene_gen_{index}_{uuid.uuid4()}.mp4"
@@ -490,7 +494,7 @@ def process_single_scene(
         return {"index": index, "video_path": None, "status": "failed"}
 
 # -------------------------
-# [RESTORED] Metadata Helpers (Fixes NameError)
+# Metadata Helpers
 # -------------------------
 def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Optional[str]:
     """Generates a poster image using Flux"""
@@ -538,26 +542,32 @@ def background_generate_video(self, form_data: dict):
         blueprint = analyze_competitors(scraped)
         storyboard = create_video_storyboard_agent(keyword, blueprint, form_data)
 
-        # 2. Characters & Assets
+        # 2. Characters & Assets (Multi-Character Setup)
         characters = storyboard.get("characters") or []
         uploaded_images = form_data.get("uploaded_images") or []
-        if uploaded_images:
-             for i, url in enumerate(uploaded_images):
-                 if i < len(characters): characters[i]["reference_image_url"] = url
-                 else: characters.append({"name": f"Char {i}", "reference_image_url": url})
-             storyboard["characters"] = characters
+        
+        # Dictionary to store { "Ali": "url1", "Zara": "url2" }
+        character_faces = {}
 
+        # A. Map Uploads to Characters
+        for i, url in enumerate(uploaded_images):
+            if i < len(characters):
+                char_name = characters[i].get("name", f"Char_{i}")
+                character_faces[char_name] = url
+        
+        # B. Generate Missing Faces for other characters
+        for char in characters:
+            name = char.get("name", "Unknown")
+            # If we don't have a face for this character yet, create one
+            if name not in character_faces:
+                update_status(f"Casting {name}...")
+                desc = char.get("appearance_prompt") or f"Cinematic portrait of {name}"
+                aspect_ratio = "9:16" if form_data.get("video_type") == "reel" else "16:9"
+                face_url = generate_flux_image(f"{desc}, facing camera, high detailed, 8k", aspect=aspect_ratio)
+                character_faces[name] = face_url
+
+        # Store "Hero" Profile for fallback
         char_profile = characters[0].get("appearance_prompt", "Cinematic") if characters else "Cinematic"
-
-        # GENERATE MASTER CHARACTER IMAGE ONCE
-        master_face_url = None
-        if uploaded_images:
-            master_face_url = uploaded_images[0]
-        else:
-            update_status("Casting AI Actor (Generating Consistent Face)...")
-            aspect_ratio = "9:16" if form_data.get("video_type") == "reel" else "16:9"
-            hero_prompt = f"Portrait of {char_profile}, facing camera, neutral expression, high detailed, 8k"
-            master_face_url = generate_flux_image(hero_prompt, aspect=aspect_ratio)
 
         # 3. Audio-First Pipeline
         update_status("Synthesizing Audio Dialogue...")
@@ -573,7 +583,7 @@ def background_generate_video(self, form_data: dict):
             text = segments[i].get("text") if i < len(segments) else "..."
             voice_id = segments[i].get("voice_id") if i < len(segments) else "21m00Tcm4TlvDq8ikWAM"
             
-            # [CRITICAL FIX] Clean Voice ID to remove [brackets] or spaces
+            # Clean Voice ID
             if voice_id:
                 voice_id = voice_id.strip(" []'\"")
 
@@ -613,7 +623,7 @@ def background_generate_video(self, form_data: dict):
                     asset["index"], 
                     char_profile, 
                     asset["audio_path"], 
-                    master_face_url,
+                    character_faces,  # <--- PASS THE DICT
                     aspect
                 ): asset
                 for asset in scene_assets
@@ -677,7 +687,6 @@ def background_generate_video(self, form_data: dict):
         update_status("Uploading & Finalizing...")
         final_video_url = safe_upload_to_cloudinary(final_output_path, folder="final_videos")
         
-        # [RESTORED] These functions are now defined above
         thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
         metadata = youtube_metadata_agent(full_script_text, keyword, form_data, blueprint)
 
