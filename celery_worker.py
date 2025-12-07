@@ -458,9 +458,9 @@ def process_single_scene(
         if not is_cinematic_shot and audio_path and generate_lip_sync_with_replicate:
             cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
             
-            # [FIX] Added Motion Parameters to make head move naturally
+            # [FIXED] Updated Version Hash for SadTalker (Standard Version)
             video_url = replicate.run(
-                "cjwbw/sadtalker:a519cc0cf9fb78f3f881f21427d74421b83526ee37775949d0739b6727289043",
+                "cjwbw/sadtalker:3aa3dac937e567501297eb21b508e0a7b52ccf603215c04f1839818881427723",
                 input={
                     "source_image": keyframe_url,
                     "driven_audio": cloud_audio_url,
