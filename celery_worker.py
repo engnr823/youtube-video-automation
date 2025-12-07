@@ -429,7 +429,6 @@ def process_single_scene(
             keyframe_url = scene.get("image_url")
         elif reference_img_url and not is_cinematic_shot:
             # ONLY use the Master Face if we are doing a Close-up/Talking shot.
-            # If it's a drone shot of a city, we don't want a giant face.
             keyframe_url = reference_img_url 
         else:
             # Generate a fresh image for B-Roll (e.g. Cityscape, Nature)
@@ -519,6 +518,11 @@ def background_generate_video(self, form_data: dict):
         for i, scene in enumerate(scenes):
             text = segments[i].get("text") if i < len(segments) else "..."
             voice_id = segments[i].get("voice_id") if i < len(segments) else "21m00Tcm4TlvDq8ikWAM"
+            
+            # [CRITICAL FIX] Clean Voice ID to remove [brackets] or spaces
+            if voice_id:
+                voice_id = voice_id.strip(" []'\"")
+
             full_script_text += text + " "
 
             if generate_audio_for_scene:
