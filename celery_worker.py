@@ -523,14 +523,28 @@ def background_generate_video(self, form_data: dict):
         # This is a manual step for you to implement in your HeyGen client.
         
         # Example of storing HeyGen ID (conceptual):
+        # CRITICAL FIX: Implement Real HeyGen Avatar Management
+        # Import the new function
+        from video_clients.heygen_client import create_or_get_avatar 
+
         for char in characters:
              name = char.get("name", "Unknown")
-             # --- Conceptual HeyGen ID assignment ---
+             # Get the persistent local character data
              char_data = ensure_character(name)
-             # NOTE: You must replace this line with a function that calls HeyGen's 
-             # API to register the character and get a persistent AVATAR_ID
-             char_data["heygen_avatar_id"] = "AVTR_" + name.upper() 
-             character_faces[name] = char_data
+             
+             # Find the reference image URL if uploaded by the user
+             ref_image = next((url for url in uploaded_images if name.lower() in url.lower()), None)
+             
+             # Call the new function to create/get the HeyGen Avatar ID
+             # This ID ensures consistency for a specific character across scenes.
+             try:
+                 heygen_avatar_id = create_or_get_avatar(char_name=name, ref_image=ref_image)
+                 char_data["heygen_avatar_id"] = heygen_avatar_id 
+                 character_faces[name] = char_data
+             except Exception as e:
+                 logging.error(f"Failed to create/get HeyGen avatar for {name}: {e}")
+                 # Fallback/skip if avatar creation is mandatory for a scene
+                 pass
         
         char_profile = characters[0].get("appearance_prompt", "Cinematic") if characters else "Cinematic"
 
