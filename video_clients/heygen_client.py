@@ -22,6 +22,10 @@ def retry_if_job_not_ready(exception):
     """Retry condition: only retry if the job is processing or pending."""
     return isinstance(exception, HeyGenError) and ("processing" in str(exception) or "pending" in str(exception))
 
+# file: video_clients/heygen_client.py (CRITICAL FIX APPLIED TO _make_request)
+
+# ... (imports and HEYGEN_API_URL definitions above)
+
 def _make_request(method: str, endpoint: str, **kwargs) -> Any:
     """Handles API requests and common error checking."""
     if not HEYGEN_API_KEY:
@@ -39,13 +43,31 @@ def _make_request(method: str, endpoint: str, **kwargs) -> Any:
         )
         response.raise_for_status()
         return response.json()
+    
     except requests.exceptions.HTTPError as e:
         # Catch specific API errors and raise a clean exception
         status_code = e.response.status_code
-        error_detail = e.response.json().get('detail', 'Unknown API Error')
-        raise HeyGenError(f"API Error {status_code}: {error_detail}") from e
+        
+        # --- CRITICAL FIX START: Robust Error Detail Extraction ---
+        error_detail = f"API Error {status_code}"
+        try:
+            # Attempt to parse the API's JSON error message
+            error_data = e.response.json()
+            # Use 'detail' (common) or 'message' (less common)
+            error_detail = error_data.get('detail', error_data.get('message', error_detail))
+        except requests.exceptions.JSONDecodeError:
+            # If the response body is empty/not JSON (which is what crashed it)
+            error_detail = f"Non-JSON response for status {status_code}: {e.response.text[:150]}..."
+        except Exception:
+            pass
+        # --- CRITICAL FIX END ---
+        
+        # Raise a custom error with better information
+        raise HeyGenError(f"API Request Failed ({status_code}): {error_detail}") from e
     except Exception as e:
         raise HeyGenError(f"Network Error: {e}") from e
+
+# ... (rest of the file contents below)
 
 
 def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
