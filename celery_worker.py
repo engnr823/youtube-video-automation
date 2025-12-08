@@ -275,13 +275,19 @@ def process_single_scene(
     
     try:
         # 1. Identify Character/Avatar ID for this scene
-        target_char_name = scene.get('characters_in_scene', [None])[0]
+        character_list = scene.get('characters_in_scene')
+        
+        # --- CRITICAL FIX: Safely extract the character name ---
+        # If the list exists and has content, use the first character name. Otherwise, it's None.
+        target_char_name = character_list[0] if character_list and len(character_list) > 0 else None
+        
         if not target_char_name:
-            # For B-roll, we might skip avatar_id, but the script should identify the speaker
+            # For B-roll or narrator scenes, use the first available character's avatar ID or default to "MENTOR".
             target_char_name = list(character_faces.keys())[0] if character_faces else "MENTOR"
             
         char_data = character_faces.get(target_char_name, {})
         avatar_id = char_data.get("heygen_avatar_id") # We assume the char data now holds the HeyGen ID
+        # -------------------------------------------------------
         
         if not avatar_id:
             logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Skipping avatar use.")
@@ -327,7 +333,6 @@ def process_single_scene(
     finally:
         # Cleanup logic (omitted for brevity, assume it remains)
         pass
-
 # -------------------------
 # Stitching (Kept)
 # -------------------------
