@@ -101,6 +101,10 @@ def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
     raise HeyGenError(f"Job {job_id} timed out after {max_wait} seconds.")
 
 
+# file: video_clients/heygen_client.py
+
+# ... (function definitions above)
+
 def generate_heygen_video(
     avatar_id: str,
     audio_url: str,
@@ -127,11 +131,21 @@ def generate_heygen_video(
     
     # 2. Submit Job
     logging.info(f"HeyGen: Submitting job for Avatar ID {avatar_id}...")
-    submission_data = _make_request("POST", "/jobs/video", json=request_data.dict())
+    
+    # CRITICAL FIX: Changing the incorrect API endpoint (/jobs/video) 
+    # to the standard V1 asynchronous video generation endpoint (/video.generate)
+    submission_data = _make_request("POST", "/video.generate", json=request_data.dict())
+    
     job_id = submission_data.get("job_id")
     
     if not job_id:
-        raise HeyGenError("Job submission failed to return a Job ID.")
+        # NOTE: Some API versions return the video_url directly on success.
+        video_url = submission_data.get("video_url")
+        if video_url:
+             logging.info("HeyGen Job COMPLETED synchronously.")
+             return video_url
+        
+        raise HeyGenError("Job submission failed to return a Job ID or Video URL.")
 
     # 3. Poll Status
     video_url = _poll_job_status(job_id)
@@ -140,6 +154,7 @@ def generate_heygen_video(
         raise HeyGenError("Job completed but returned no video URL.")
         
     return video_url
+
 
 
 # Example of avatar creation (for your casting step)
