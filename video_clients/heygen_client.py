@@ -7,6 +7,9 @@ import logging
 from typing import Optional, Any
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+
 # Assuming HeyGen API key is stored in the environment
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
 HEYGEN_API_URL = "https://api.heygen.com/v1" # Example URL
@@ -118,12 +121,37 @@ def generate_heygen_video(
 
 
 # Example of avatar creation (for your casting step)
-def create_or_get_avatar(char_name: str, ref_image: str) -> Optional[str]:
+def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Optional[str]:
     """
-    Conceptual function to check if avatar exists or create it, returning the Avatar ID.
-    This replaces the Flux image generation in the casting step.
+    Simulated function to return a persistent HeyGen Avatar ID based on character name.
+    
+    In a real setup:
+    1. Check a local database (CHAR_DB) for an existing 'heygen_avatar_id' for 'char_name'.
+    2. If not found, call HeyGen's Avatar Creation API using 'ref_image' (if provided).
+    3. Cache and return the new HeyGen ID.
+    
+    For now, we use a simple lookup for simulation to enable multi-character logic in the worker.
     """
-    # NOTE: HeyGen requires a specific image format for avatar creation.
-    logging.warning(f"HeyGen: Simulating avatar creation for {char_name}. Replace with real API call.")
-    # In a real setup, this would call /avatars/create and return the new ID
-    return f"AVTR_{char_name.upper()}_REAL"
+    logging.warning(f"HeyGen: Simulating avatar creation/lookup for {char_name}.")
+
+    # 1. Simple, simulated persistent ID assignment based on name
+    name_key = char_name.upper().replace(" ", "_").strip()
+
+    # Use a dictionary to map common names to unique, persistent (mock) HeyGen IDs
+    MOCK_AVATAR_MAP = {
+        "ALI": "AVTR_MALE_CONSISTENT_001",
+        "ZARA": "AVTR_FEMALE_CONSISTENT_002",
+        "KABIR": "AVTR_MALE_CONSISTENT_003",
+        "NARRATOR": "AVTR_NARRATOR_GENERIC_000",
+        # Add more names as needed based on common storyboards
+    }
+    
+    # 2. Check if the name is in the map, otherwise create a new mock ID
+    avatar_id = MOCK_AVATAR_MAP.get(name_key)
+    
+    if not avatar_id:
+        # Create a simpler, unique ID for consistency if not a predefined name
+        avatar_id = f"AVTR_DYNAMIC_{name_key}"
+        logging.info(f"Assigned dynamic mock avatar ID: {avatar_id}")
+
+    return avatar_id
