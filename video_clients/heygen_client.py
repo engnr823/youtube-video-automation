@@ -114,7 +114,6 @@ def generate_heygen_video(
 ) -> str:
     """
     Generate HeyGen video using V2 API.
-    Automatically detects if the ID is a 'Talking Photo' or standard 'Avatar'.
     """
 
     if aspect_ratio == "9:16":
@@ -122,22 +121,15 @@ def generate_heygen_video(
     else:
         dimension = {"width": 1280, "height": 720}
 
-    # --- CRITICAL FIX FOR YOUR AVATAR TYPE ---
-    # If the ID matches your uploaded photo avatar, we MUST use 'talking_photo' type.
-    if avatar_id == "4343bfb447bf4028a48b598ae297f5dc":
-        character_config = {
-            "type": "talking_photo",
-            "talking_photo_id": avatar_id
-        }
-        logging.info(f"Using TALKING PHOTO mode for ID: {avatar_id}")
-    else:
-        # Default behavior for standard avatars (like the female one)
-        character_config = {
-            "type": "avatar",
-            "avatar_id": avatar_id,
-            "avatar_style": "normal"
-        }
-        logging.info(f"Using STANDARD AVATAR mode for ID: {avatar_id}")
+    # --- CHANGED: FORCE STANDARD AVATAR MODE ---
+    # We are now treating your personal ID as a standard "avatar".
+    # If this fails again, the ID itself is likely invalid or deleted.
+    character_config = {
+        "type": "avatar",
+        "avatar_id": avatar_id,
+        "avatar_style": "normal"
+    }
+    logging.info(f"Using STANDARD AVATAR mode for ID: {avatar_id}")
 
     payload = {
         "video_inputs": [
@@ -178,7 +170,7 @@ def get_stock_avatar(avatar_type: str = "male") -> str:
     Returns the configured Avatar IDs.
     """
     AVATARS = {
-        "male": "4343bfb447bf4028a48b598ae297f5dc",   # Your Talking Photo
+        "male": "4343bfb447bf4028a48b598ae297f5dc",   # Your Personal ID
         "female": "26f5fc9be1fc47eab0ef65df30d47a4e" # Public Female Avatar
     }
     
