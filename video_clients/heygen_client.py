@@ -167,7 +167,7 @@ def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Opt
     
     # 1. --- FINAL AVATAR IDs ---
     # User's Custom ID for the male character slot (Mentor/Ali):
-    STOCK_ID_MALE = "4343bfb447bf4028a48b598ae297f5dc" 
+    STOCK_ID_MALE = "Max-inTshirt-20220820" 
     
     # User-provided Public Stock Female Avatar ID (Zara/Apprentice):
     STOCK_ID_FEMALE = "26f5fc9be1fc47eab0ef65df30d47a4e" 
