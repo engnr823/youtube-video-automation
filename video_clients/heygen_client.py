@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Assuming HeyGen API key is stored in the environment
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
-# CRITICAL FIX: Base URL should ONLY contain the domain, not the version /v1
+# CRITICAL FIX: Base URL must be only the domain to correctly append V2 path
 HEYGEN_API_URL = "https://api.heygen.com" 
 
 class HeyGenError(Exception):
@@ -63,6 +63,7 @@ def _make_request(method: str, endpoint: str, **kwargs) -> Any:
 
 def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
     """Polls the API until the video job is complete (success or failure)."""
+    # NOTE: Assuming status endpoint uses the same base URL structure
     endpoint = f"/jobs/{job_id}/status" 
     start_time = time.time()
     
@@ -91,20 +92,16 @@ def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
 
 
 # ----------------- HEYGEN UTILITY FUNCTIONS (Conceptual Implementation) -----------------
+# These functions are placeholders that must be replaced by real API calls 
+# if you want to create a NEW avatar every time an image is uploaded.
 
 def _upload_image_to_heygen(image_url: str) -> Optional[str]:
-    """
-    CONCEPTUAL: Uploads user's image URL to HeyGen's Asset API. Returns image_key.
-    This must be a real API call for Custom Avatar Mode to work.
-    """
+    """CONCEPTUAL: Returns image_key."""
     logging.warning(f"HEYGEN: Custom Avatar creation simulated. Requires real Upload Asset API.")
     return "MOCK_IMAGE_KEY_" + str(uuid.uuid4())[:8]
 
 def _create_photo_avatar(name: str, image_key: str) -> Optional[str]:
-    """
-    CONCEPTUAL: Creates a HeyGen Photo Avatar Group from an image_key. Returns avatar_id.
-    This must be a real API call for Custom Avatar Mode to work.
-    """
+    """CONCEPTUAL: Creates a Photo Avatar Group. Returns avatar_id."""
     logging.warning(f"HEYGEN: Custom Avatar creation simulated. Requires real Create Photo Avatar Group API.")
     return "AVATAR_GROUP_" + str(uuid.uuid4())[:8] 
 
@@ -174,33 +171,32 @@ def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Opt
     # ---------------------------
 
     # 2. Custom Avatar Mode (User Uploaded Image)
+    # NOTE: This block is currently skipped in simulation, as it requires paid API calls.
     if ref_image and ref_image.startswith("http"):
         try:
             logging.info(f"Custom Avatar Mode: Attempting creation for {char_name}.")
             
             name_key = char_name.upper()
             
-            # Use the actual custom ID (User's face) for the main male character types
+            # Since the user uploaded a photo, we use the pre-created custom ID 
+            # for the primary male character slot to ensure consistency.
             if name_key in ('ALI', 'KABIR', 'MENTOR') or 'MALE' in name_key:
-                logging.info(f"Using user's custom ID {STOCK_ID_MALE} for main character.")
+                logging.warning("Skipping Custom Avatar creation steps. Using pre-created ID for consistency.")
                 return STOCK_ID_MALE
-            
-            # Fall through for other characters
             
         except Exception as e:
             logging.error(f"Failed to process Custom Avatar for {char_name}: {e}. Falling back to Stock.")
-            # Fall through to Stock Avatar mode on API failure
 
     # 3. Stock Avatar Mode (Default Fallback)
     
     name_key = char_name.upper()
 
     if name_key in ('ALI', 'KABIR', 'MENTOR') or 'MALE' in name_key:
-         # Use the user's custom ID as the default male avatar now
+         # Uses the user's custom ID as the default male avatar now
          return STOCK_ID_MALE
     elif name_key in ('ZARA', 'APPRENTICE') or 'FEMALE' in name_key:
-         # Use the real stock female ID for secondary character consistency
+         # Uses the real stock female ID for secondary character consistency
          return STOCK_ID_FEMALE
     
-    # Final default fallback (defaults to the male custom ID)
+    # Final default fallback
     return STOCK_ID_MALE
