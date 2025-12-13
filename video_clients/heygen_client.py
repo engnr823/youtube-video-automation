@@ -4,11 +4,9 @@ import os
 import time
 import requests
 import logging
+import uuid # <-- ADDED for generating unique keys/IDs
 from typing import Optional, Any
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 
 # Assuming HeyGen API key is stored in the environment
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
@@ -21,10 +19,6 @@ class HeyGenError(Exception):
 def retry_if_job_not_ready(exception):
     """Retry condition: only retry if the job is processing or pending."""
     return isinstance(exception, HeyGenError) and ("processing" in str(exception) or "pending" in str(exception))
-
-# file: video_clients/heygen_client.py (CRITICAL FIX APPLIED TO _make_request)
-
-# ... (imports and HEYGEN_API_URL definitions above)
 
 def _make_request(method: str, endpoint: str, **kwargs) -> Any:
     """Handles API requests and common error checking."""
@@ -48,26 +42,19 @@ def _make_request(method: str, endpoint: str, **kwargs) -> Any:
         # Catch specific API errors and raise a clean exception
         status_code = e.response.status_code
         
-        # --- CRITICAL FIX START: Robust Error Detail Extraction ---
+        # --- CRITICAL FIX: Robust Error Detail Extraction (Kept) ---
         error_detail = f"API Error {status_code}"
         try:
-            # Attempt to parse the API's JSON error message
             error_data = e.response.json()
-            # Use 'detail' (common) or 'message' (less common)
             error_detail = error_data.get('detail', error_data.get('message', error_detail))
         except requests.exceptions.JSONDecodeError:
-            # If the response body is empty/not JSON (which is what crashed it)
             error_detail = f"Non-JSON response for status {status_code}: {e.response.text[:150]}..."
         except Exception:
             pass
-        # --- CRITICAL FIX END ---
         
-        # Raise a custom error with better information
         raise HeyGenError(f"API Request Failed ({status_code}): {error_detail}") from e
     except Exception as e:
         raise HeyGenError(f"Network Error: {e}") from e
-
-# ... (rest of the file contents below)
 
 
 def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
@@ -92,18 +79,39 @@ def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
             logging.info(f"HeyGen Job {job_id} status: {status}. Polling...")
             
         except HeyGenError as e:
-            # If the error is network related, we allow the outer function's retry to handle it.
             if "Job failed" in str(e):
                  raise # Re-raise failure immediately
-            # Otherwise, continue polling if it's not a definitive failure status
             logging.warning(f"Polling error for Job {job_id}: {e}")
             
     raise HeyGenError(f"Job {job_id} timed out after {max_wait} seconds.")
 
 
-# file: video_clients/heygen_client.py
+# ----------------- HEYGEN UTILITY FUNCTIONS (Conceptual Implementation) -----------------
 
-# ... (function definitions above)
+def _upload_image_to_heygen(image_url: str) -> Optional[str]:
+    """
+    CONCEPTUAL: Uploads user's image URL to HeyGen's Asset API. 
+    In a real implementation, you would call:
+    1. Download the file from `image_url` (which is a Cloudinary URL from `app.py`).
+    2. Call `_make_request("POST", "/asset/upload", ...)` with the file/bytes.
+    Returns the HeyGen `image_key`.
+    """
+    logging.warning(f"HEYGEN: Simulating asset upload for {image_url}. REQUIRES REAL API.")
+    # Return a unique mock key for simulation
+    return "MOCK_IMAGE_KEY_" + str(uuid.uuid4())[:8]
+
+def _create_photo_avatar(name: str, image_key: str) -> Optional[str]:
+    """
+    CONCEPTUAL: Creates a HeyGen Photo Avatar Group from an image_key. 
+    In a real implementation, you would call:
+    1. Call `_make_request("POST", "/v2/photo_avatar/avatar_group/create", ...)`
+    Returns the new `avatar_id`.
+    """
+    logging.warning(f"HEYGEN: Simulating Photo Avatar creation for {name}. REQUIRES REAL API.")
+    # Return a unique mock avatar ID for simulation
+    return "AVATAR_GROUP_" + str(uuid.uuid4())[:8]
+
+# ----------------- MAIN VIDEO GENERATION FUNCTION (Kept) -----------------
 
 def generate_heygen_video(
     avatar_id: str,
@@ -115,7 +123,6 @@ def generate_heygen_video(
 ) -> str:
     """
     Submits a video generation job and polls the status until complete.
-    This replaces the SadTalker/Wan-Video multi-step process.
     """
     from .heygen_models import HeyGenVideoRequest
     
@@ -132,14 +139,12 @@ def generate_heygen_video(
     # 2. Submit Job
     logging.info(f"HeyGen: Submitting job for Avatar ID {avatar_id}...")
     
-    # CRITICAL FIX: Changing the incorrect API endpoint (/jobs/video) 
-    # to the standard V1 asynchronous video generation endpoint (/video.generate)
+    # CRITICAL FIX: Correct endpoint for video generation
     submission_data = _make_request("POST", "/video.generate", json=request_data.dict())
     
     job_id = submission_data.get("job_id")
     
     if not job_id:
-        # NOTE: Some API versions return the video_url directly on success.
         video_url = submission_data.get("video_url")
         if video_url:
              logging.info("HeyGen Job COMPLETED synchronously.")
@@ -156,39 +161,49 @@ def generate_heygen_video(
     return video_url
 
 
+# ----------------- MAIN AVATAR CREATION LOGIC (Intelligent Auto-Switching) -----------------
 
-# Example of avatar creation (for your casting step)
 def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Optional[str]:
     """
-    Simulated function to return a persistent HeyGen Avatar ID based on character name.
-    
-    In a real setup:
-    1. Check a local database (CHAR_DB) for an existing 'heygen_avatar_id' for 'char_name'.
-    2. If not found, call HeyGen's Avatar Creation API using 'ref_image' (if provided).
-    3. Cache and return the new HeyGen ID.
-    
-    For now, we use a simple lookup for simulation to enable multi-character logic in the worker.
+    Handles multi-mode character assignment: Custom Avatar (if image) or Stock Avatar (default).
     """
-    logging.warning(f"HeyGen: Simulating avatar creation/lookup for {char_name}.")
-
-    # 1. Simple, simulated persistent ID assignment based on name
-    name_key = char_name.upper().replace(" ", "_").strip()
-
-    # Use a dictionary to map common names to unique, persistent (mock) HeyGen IDs
-    MOCK_AVATAR_MAP = {
-        "ALI": "AVTR_MALE_CONSISTENT_001",
-        "ZARA": "AVTR_FEMALE_CONSISTENT_002",
-        "KABIR": "AVTR_MALE_CONSISTENT_003",
-        "NARRATOR": "AVTR_NARRATOR_GENERIC_000",
-        # Add more names as needed based on common storyboards
-    }
     
-    # 2. Check if the name is in the map, otherwise create a new mock ID
-    avatar_id = MOCK_AVATAR_MAP.get(name_key)
-    
-    if not avatar_id:
-        # Create a simpler, unique ID for consistency if not a predefined name
-        avatar_id = f"AVTR_DYNAMIC_{name_key}"
-        logging.info(f"Assigned dynamic mock avatar ID: {avatar_id}")
+    # 1. --- CRITICAL: PASTE REAL STOCK AVATAR IDs HERE ---
+    # Find these IDs in your HeyGen dashboard or V2 API docs.
+    STOCK_ID_MALE = "PASTE_YOUR_MALE_STOCK_AVATAR_ID" 
+    STOCK_ID_FEMALE = "PASTE_YOUR_FEMALE_STOCK_AVATAR_ID" 
+    # --------------------------------------------------------
 
-    return avatar_id
+    # 2. Custom Avatar Mode (User Uploaded Image)
+    if ref_image and ref_image.startswith("http"):
+        try:
+            logging.info(f"Custom Avatar Mode: Attempting creation for {char_name}.")
+            # Step 1: Upload the asset (returns HeyGen internal key)
+            image_key = _upload_image_to_heygen(ref_image)
+            
+            # Step 2: Create the Photo Avatar Group (returns the new permanent Avatar ID)
+            avatar_id = _create_photo_avatar(char_name, image_key)
+            
+            if not avatar_id:
+                raise HeyGenError("Avatar creation API failed to return an ID.")
+            
+            logging.info(f"Successfully created Photo Avatar ID: {avatar_id}")
+            return avatar_id
+            
+        except Exception as e:
+            logging.error(f"Failed to create Photo Avatar for {char_name}: {e}. Falling back to Stock.")
+            # Fall through to Stock Avatar mode on API failure
+
+    # 3. Stock Avatar Mode (Default Fallback)
+    
+    name_key = char_name.upper()
+
+    if name_key == 'ALI' or name_key == 'KABIR' or 'MALE' in name_key:
+         # Use the designated male stock ID
+         return STOCK_ID_MALE
+    elif name_key == 'ZARA' or 'FEMALE' in name_key:
+         # Use the designated female stock ID
+         return STOCK_ID_FEMALE
+    
+    # Default return if no specific character name is found
+    return STOCK_ID_MALE
