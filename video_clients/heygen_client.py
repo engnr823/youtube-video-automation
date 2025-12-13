@@ -2,7 +2,7 @@ import os
 import time
 import requests
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # -------------------------------------------------
 # CONFIG
@@ -18,7 +18,7 @@ MAX_WAIT_TIME = 600      # 10 minutes
 logging.basicConfig(level=logging.INFO)
 
 # LOGGING PROOF THAT NEW CODE IS ACTIVE
-logging.info("*** NEW HEYGEN CLIENT CODE LOADED (v4-FIXED) ***")
+logging.info("*** NEW HEYGEN CLIENT CODE LOADED (v5-DYNAMIC) ***")
 
 class HeyGenError(Exception):
     pass
@@ -68,7 +68,29 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
         raise HeyGenError(f"HeyGen Error: {str(e)}")
 
 # -------------------------------------------------
-# JOB POLLING (With V1 Endpoint Fix)
+# NEW: DYNAMIC AVATAR FETCHER
+# -------------------------------------------------
+def get_all_avatars() -> List[Dict]:
+    """
+    Fetches the list of available avatars from the user's HeyGen account.
+    Returns a list of avatar dictionaries.
+    """
+    try:
+        logging.info("Fetching available avatars from HeyGen...")
+        # V2 Endpoint for listing avatars
+        data = _request("GET", "/v2/avatars")
+        if not data: return []
+        
+        # The structure is usually { "data": { "avatars": [...] } }
+        avatars = data.get("data", {}).get("avatars", [])
+        logging.info(f"✅ Found {len(avatars)} avatars in account.")
+        return avatars
+    except Exception as e:
+        logging.error(f"Failed to list avatars: {e}")
+        return []
+
+# -------------------------------------------------
+# JOB POLLING (V1 Endpoint Fix)
 # -------------------------------------------------
 
 def _wait_for_job(video_id: str) -> str:
@@ -123,8 +145,7 @@ def generate_heygen_video(
     else:
         dimension = {"width": 1280, "height": 720}
 
-    # --- CRITICAL FIX: REMOVED FORCED "TALKING PHOTO" MODE ---
-    # We now always use the standard avatar mode, which supports full video generation.
+    # Always use standard avatar mode for video generation
     character = {
         "type": "avatar",
         "avatar_id": avatar_id,
@@ -155,12 +176,9 @@ def generate_heygen_video(
     return _wait_for_job(video_id)
 
 # -------------------------------------------------
-# AVATAR HELPERS
+# AVATAR HELPERS (DEPRECATED BUT KEPT FOR COMPAT)
 # -------------------------------------------------
 
 def get_stock_avatar(avatar_type: str = "male") -> str:
-    AVATARS = {
-        "male": "Avatar_Expressive_20240520_02", # Tyler (Public)
-        "female": "Avatar_Expressive_20240520_02" # Rachel (Public) - Change if you have a specific female ID
-    }
-    return AVATARS.get(avatar_type.lower(), "Avatar_Expressive_20240520_02")
+    # This is a fallback local map, but we prefer dynamic fetching now.
+    return "Avatar_Expressive_20240520_02"
