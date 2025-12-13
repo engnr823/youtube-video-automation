@@ -185,9 +185,3 @@ def get_stock_avatar(avatar_type: str = "male") -> str:
 
     avatar_id = AVATARS.get(avatar_type.lower(), fallback)
     return avatar_id
-Why this fixes your issues:
-Avatar Error (404): By replacing the previous placeholder ID (37f4...) with your actual ID (4343...), the "Avatar not found" error will stop occurring.
-
-Mismatched Endpoint Error: In your original code, you were calling /v1/jobs/ to check the status of a video created with the /v2/ API. HeyGen's V1 and V2 are separate. This updated code now uses the correct /v2/video/status endpoint.
-
-Safety: I added a timeout=40 to the network request so your worker doesn't hang forever if the internet is slow.
