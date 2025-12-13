@@ -92,7 +92,9 @@ def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
 
 
 # ----------------- HEYGEN UTILITY FUNCTIONS (Conceptual Implementation) -----------------
-# These functions are stubs for the full paid/custom avatar workflow.
+# NOTE: These stubs are for the full, non-pre-created custom avatar workflow. 
+# Since you have a pre-created ID, they are not strictly needed but are kept 
+# for future expansion of custom avatar uploads.
 
 def _upload_image_to_heygen(image_url: str) -> Optional[str]:
     """CONCEPTUAL: Returns image_key."""
@@ -130,7 +132,8 @@ def generate_heygen_video(
             }
         ],
         "ratio": aspect,
-        "test": True, # Use test mode to check API connection and credits
+        # NOTE: Test mode is useful for debugging, but for production, set to False
+        "test": False, 
     }
 
     # 2. Submit Job
@@ -166,15 +169,14 @@ def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Opt
     """
     
     # 1. --- FINAL AVATAR IDs ---
-    # User's Custom ID for the male character slot (Mentor/Ali):
-    STOCK_ID_MALE = "Max-inTshirt-20220820" 
+    # User's Custom ID for the male character slot (Mentor/Ali) - Reinstated your ID
+    STOCK_ID_MALE = "4343bfb447bf4028a48b598ae297f5dc" 
     
-    # User-provided Public Stock Female Avatar ID (Zara/Apprentice):
+    # User-provided Public Stock Female Avatar ID (Zara/Apprentice)
     STOCK_ID_FEMALE = "26f5fc9be1fc47eab0ef65df30d47a4e" 
     # ---------------------------
 
     # 2. Custom Avatar Mode (User Uploaded Image)
-    # The logic ensures that if an image is uploaded AND the character is male, we use the user's custom ID.
     if ref_image and ref_image.startswith("http"):
         name_key = char_name.upper()
         
