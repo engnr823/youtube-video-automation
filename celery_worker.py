@@ -16,7 +16,7 @@ from string import Template
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 
-# --- CRITICAL FIX 1: Ensure Python can find sibling packages like 'video_clients' ---
+# --- CRITICAL FIX: Ensure Python can find sibling packages like 'video_clients' ---
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, WORKER_DIR) 
 # ---------------------------------------------------------------------------------
@@ -30,19 +30,18 @@ from pydantic import BaseModel, ValidationError
 # Celery app import
 from celery_init import celery
 
-# --- REPLICATE REMOVAL ---
+# --- REPLICATE REMOVAL (Kept explicit None to avoid reference errors) ---
 replicate = None 
 replicate_client = None 
 
 from openai import OpenAI
 
-# --- CONSTANTS FOR VOICES ---
+# --- CONSTANTS FOR VOICES AND AVATARS ---
 MALE_VOICE_ID = "ErXwobaYiN019PkySvjV" 
 FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
-# --- GLOBAL AVATAR CACHE ---
-# We will populate this dynamically to avoid 404s
-CACHED_AVATAR_ID = None
+# --- SAFE FALLBACK AVATAR (Josh Lite - Works on Free/Pro/Enterprise) ---
+SAFE_FALLBACK_AVATAR_ID = "josh_lite3_20230714"
 
 # --- Utility Fix: Define missing ensure_dir function ---
 def ensure_dir(path):
@@ -51,14 +50,14 @@ def ensure_dir(path):
         os.makedirs(path, exist_ok=True)
 # --------------------------------------------------------
 
-# --- VOICE SETTINGS SAFE IMPORT (Kept) ---
+# --- VOICE SETTINGS SAFE IMPORT ---
 try:
     from elevenlabs import VoiceSettings
 except Exception:
     VoiceSettings = None
     logging.warning("⚠️ ElevenLabs VoiceSettings not found. Using default voice stability.")
 
-# --- UTILS IMPORT SAFETY BLOCK (Kept) ---
+# --- UTILS IMPORT SAFETY BLOCK ---
 try:
     from utils.ffmpeg_utils import get_media_duration
 except Exception:
@@ -77,7 +76,7 @@ except Exception:
             logging.error(f"Error getting duration for {file_path}: {e}")
             return 0.0
 
-# --- CLIENT IMPORT SAFETY BLOCK (MODIFIED FOR HEYGEN) ---
+# --- CLIENT IMPORT SAFETY BLOCK (ELEVENLABS) ---
 try:
     from video_clients.elevenlabs_client import (
         generate_audio_for_scene
@@ -86,15 +85,16 @@ except Exception:
     logging.warning("⚠️ ElevenLabs client not found. Voiceover generation will fail.")
     generate_audio_for_scene = None
 
-# CRITICAL FIX 2: Correct HeyGen client import
+# --- CRITICAL FIX: ROBUST HEYGEN CLIENT IMPORT ---
 try:
-    from video_clients.heygen_client import generate_heygen_video, get_stock_avatar, get_all_avatars, HeyGenError
+    from video_clients.heygen_client import generate_heygen_video, get_all_avatars, get_safe_fallback_id, HeyGenError
     HEYGEN_AVAILABLE = True
 except ImportError as e:
     logging.error(f"❌ HEYGEN CLIENT NOT FOUND. Video generation will fail. IMPORT ERROR: {e}")
     generate_heygen_video = None
-    get_stock_avatar = None
     get_all_avatars = None
+    # Use local fallback if import fails
+    get_safe_fallback_id = lambda: SAFE_FALLBACK_AVATAR_ID
     HEYGEN_AVAILABLE = False
 
 
@@ -120,7 +120,7 @@ else:
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # -------------------------
-# Royalty-Free Music Library (Filtered for Cinematic/Motivation)
+# Royalty-Free Music Library
 # -------------------------
 MUSIC_LIBRARY = {
     "motivational": "https://cdn.pixabay.com/audio/2022/07/22/powerful-8526.mp3",
@@ -131,7 +131,7 @@ MUSIC_LIBRARY = {
 }
 
 # -------------------------
-# Pydantic Schemas (Kept)
+# Pydantic Schemas
 # -------------------------
 class SceneSchema(BaseModel):
     scene_id: int
@@ -178,7 +178,7 @@ def ensure_character(name: str, appearance_prompt: Optional[str] = None, referen
     return db[name]
 
 # -------------------------
-# Core Utils (Kept)
+# Core Utils
 # -------------------------
 
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3),
@@ -251,7 +251,7 @@ def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str 
 
 
 # -------------------------
-# Single scene processor (FIXED FOR DYNAMIC AVATAR)
+# Single scene processor (ROBUST VERSION)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -260,7 +260,7 @@ def process_single_scene(
     audio_path: str = None,
     character_faces: dict = {},
     aspect: str = "9:16",
-    fallback_avatar_id: str = None # NEW ARGUMENT
+    fallback_avatar_id: str = None # Passed from main task
 ) -> dict:
     
     if not HEYGEN_AVAILABLE:
@@ -289,20 +289,20 @@ def process_single_scene(
             logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Using dynamic fallback.")
             avatar_id = fallback_avatar_id
 
+        # Use safe fallback if still None
         if not avatar_id:
-             logging.error(f"Scene {index} SKIPPED: Missing Avatar ID. Cannot call HeyGen.")
-             return {"index": index, "video_path": None, "status": "skipped"}
+            avatar_id = SAFE_FALLBACK_AVATAR_ID
 
         # 2. Upload Audio
         cloud_audio_url = None
         if audio_path and os.path.exists(audio_path):
             cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
             
-        if not cloud_audio_url and (avatar_id or index > 0):
+        if not cloud_audio_url:
              logging.warning(f"Scene {index} skipped as required audio/avatar is missing.")
              return {"index": index, "video_path": None, "status": "skipped"}
 
-        # 3. Call the single HeyGen API function
+        # 3. Call HeyGen
         logging.info(f"Calling HeyGen for Scene {index} (Avatar: {avatar_id})")
         
         video_url = generate_heygen_video(
@@ -322,6 +322,7 @@ def process_single_scene(
         return {"index": index, "video_path": temp_video_path, "status": "success"}
 
     except Exception as e:
+        # Catch exception to allow other scenes to proceed if one fails
         logging.error(f"Scene {index} failed: {traceback.format_exc()}")
         return {"index": index, "video_path": None, "status": "failed"}
     finally:
@@ -330,7 +331,7 @@ def process_single_scene(
              except Exception as e: logging.warning(f"Failed to clean up temp dir {temp_dir}: {e}")
 
 # -------------------------
-# Stitching (Kept)
+# Stitching
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     request_id = str(uuid.uuid4())
@@ -380,7 +381,7 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
 
 
 # -------------------------
-# AGENTS (Kept)
+# AGENTS
 # -------------------------
 
 def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: bool = False) -> str:
@@ -505,17 +506,21 @@ def background_generate_video(self, form_data: dict):
         update_status("Fetching Available Avatars...")
         valid_avatar_id = None
         try:
-            avatars = get_all_avatars()
-            if avatars and len(avatars) > 0:
-                # Prioritize standard avatars over others
-                valid_avatar_id = avatars[0].get("avatar_id")
-                logging.info(f"✅ Auto-selected valid avatar ID: {valid_avatar_id}")
-            else:
-                logging.warning("⚠️ No avatars found in account. Trying known stock ID.")
-                valid_avatar_id = "Angela-inTshirt-20220820" # Safe Fallback
+            # 1. Try to fetch dynamic list
+            if get_all_avatars:
+                avatars = get_all_avatars()
+                if avatars and len(avatars) > 0:
+                    valid_avatar_id = avatars[0].get("avatar_id")
+                    logging.info(f"✅ Auto-selected valid avatar ID from account: {valid_avatar_id}")
+            
+            # 2. Use Safe Fallback if dynamic fetch failed or empty
+            if not valid_avatar_id:
+                logging.warning(f"⚠️ No avatars found in account. Using SAFE fallback: {SAFE_FALLBACK_AVATAR_ID}")
+                valid_avatar_id = SAFE_FALLBACK_AVATAR_ID
+                
         except Exception as e:
-            logging.error(f"Avatar fetch error: {e}")
-            valid_avatar_id = "Angela-inTshirt-20220820"
+            logging.error(f"Avatar fetch error: {e}. Using fallback.")
+            valid_avatar_id = SAFE_FALLBACK_AVATAR_ID
         # ----------------------------------------------------
 
         # 1. Blueprint
@@ -538,7 +543,7 @@ def background_generate_video(self, form_data: dict):
              char_data = ensure_character(name, appearance_prompt=char.get("appearance_prompt"))
              ref_image = next((url for url in uploaded_images if name.lower() in url.lower()), None)
              
-             # Fallback to the auto-detected valid ID
+             # Pass the VALID avatar ID we resolved earlier
              char_data["heygen_avatar_id"] = valid_avatar_id
              char_data["reference_image"] = ref_image 
              character_faces[name] = char_data
@@ -589,7 +594,7 @@ def background_generate_video(self, form_data: dict):
                     asset["audio_path"], 
                     character_faces, 
                     aspect,
-                    valid_avatar_id # NEW ARG
+                    valid_avatar_id # NEW ARGUMENT
                 ): asset
                 for asset in scene_assets
             }
