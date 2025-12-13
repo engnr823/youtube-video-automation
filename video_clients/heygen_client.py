@@ -1,3 +1,5 @@
+# file: heygen_client.py
+
 import os
 import time
 import requests
@@ -12,8 +14,11 @@ HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
 HEYGEN_BASE_URL = "https://api.heygen.com"
 SAFE_AVATAR_ID = "josh_lite3_20230714" 
 
+# Define the Green Screen Color for Compositing compatibility
+GREEN_SCREEN_COLOR = "#00B140"
+
 # Increased polling interval to be safe
-POLL_INTERVAL = 10       
+POLL_INTERVAL = 10      
 MAX_WAIT_TIME = 600      # 10 minutes
 
 logging.basicConfig(level=logging.INFO)
@@ -60,8 +65,8 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None, timeout
             except Exception as e:
                 if isinstance(e, HeyGenError): raise e
                 logging.error(f"HeyGen Raw Error: {response.text}")
-        
-        response.raise_for_status()
+            
+            response.raise_for_status()
         return response.json()
 
     except HeyGenError:
@@ -140,7 +145,7 @@ def generate_heygen_video(
     avatar_id: str,
     audio_url: str,
     aspect_ratio: str = "9:16",
-    background_color: str = "#000000"
+    background_color: str = "#000000" # This parameter is used for Green Screen request
 ) -> str:
     
     # 1. Configuration
