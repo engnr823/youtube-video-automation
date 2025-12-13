@@ -16,7 +16,7 @@ from string import Template
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 
-# --- CRITICAL FIX: Ensure Python can find sibling packages like 'video_clients' ---
+# --- CRITICAL FIX 1: Ensure Python can find sibling packages like 'video_clients' ---
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, WORKER_DIR) 
 # ---------------------------------------------------------------------------------
@@ -50,14 +50,14 @@ def ensure_dir(path):
         os.makedirs(path, exist_ok=True)
 # --------------------------------------------------------
 
-# --- VOICE SETTINGS SAFE IMPORT ---
+# --- VOICE SETTINGS SAFE IMPORT (Kept) ---
 try:
     from elevenlabs import VoiceSettings
 except Exception:
     VoiceSettings = None
     logging.warning("⚠️ ElevenLabs VoiceSettings not found. Using default voice stability.")
 
-# --- UTILS IMPORT SAFETY BLOCK ---
+# --- UTILS IMPORT SAFETY BLOCK (Kept) ---
 try:
     from utils.ffmpeg_utils import get_media_duration
 except Exception:
@@ -76,7 +76,7 @@ except Exception:
             logging.error(f"Error getting duration for {file_path}: {e}")
             return 0.0
 
-# --- CLIENT IMPORT SAFETY BLOCK (ELEVENLABS) ---
+# --- CLIENT IMPORT SAFETY BLOCK (MODIFIED FOR HEYGEN) ---
 try:
     from video_clients.elevenlabs_client import (
         generate_audio_for_scene
@@ -85,7 +85,7 @@ except Exception:
     logging.warning("⚠️ ElevenLabs client not found. Voiceover generation will fail.")
     generate_audio_for_scene = None
 
-# --- CRITICAL FIX: ROBUST HEYGEN CLIENT IMPORT ---
+# CRITICAL FIX 2: Correct HeyGen client import
 try:
     from video_clients.heygen_client import (
         generate_heygen_video, 
@@ -98,7 +98,7 @@ except ImportError as e:
     logging.error(f"❌ HEYGEN CLIENT NOT FOUND. Video generation will fail. IMPORT ERROR: {e}")
     generate_heygen_video = None
     get_all_avatars = None
-    # Use local fallback if import fails
+    # Mock fallback
     get_safe_fallback_id = lambda: SAFE_FALLBACK_AVATAR_ID
     HEYGEN_AVAILABLE = False
 
@@ -125,7 +125,7 @@ else:
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # -------------------------
-# Royalty-Free Music Library
+# Royalty-Free Music Library (Filtered for Cinematic/Motivation)
 # -------------------------
 MUSIC_LIBRARY = {
     "motivational": "https://cdn.pixabay.com/audio/2022/07/22/powerful-8526.mp3",
@@ -136,7 +136,7 @@ MUSIC_LIBRARY = {
 }
 
 # -------------------------
-# Pydantic Schemas
+# Pydantic Schemas (Kept)
 # -------------------------
 class SceneSchema(BaseModel):
     scene_id: int
@@ -183,7 +183,7 @@ def ensure_character(name: str, appearance_prompt: Optional[str] = None, referen
     return db[name]
 
 # -------------------------
-# Core Utils
+# Core Utils (Kept)
 # -------------------------
 
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3),
@@ -206,7 +206,7 @@ def safe_upload_to_cloudinary(filepath: str, resource_type="video", folder="auto
         return url
     except Exception as e:
         logging.error(f"Cloudinary upload failed: {e}")
-        return None
+        raise
 
 def load_prompt_template(filename: str) -> str:
     path = os.path.join("prompts", filename)
@@ -250,13 +250,14 @@ def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str 
     Used primarily for initial character casting and thumbnail generation.
     """
     logging.warning("⚠️ Using conceptual image generation. Replace this with a working image API call.")
+    # Fallback to a placeholder URL in the absence of a working API to allow the pipeline to proceed
     if 'old man' in prompt.lower() or 'mentor' in prompt.lower():
-        return "https://placeimg.com/480/832/people" 
+        return "https://placeimg.com/480/832/people" # Placeholder for Mentor
     return "https://placeimg.com/480/832/abstract"
 
 
 # -------------------------
-# Single scene processor (FIXED FOR DYNAMIC AVATAR)
+# Single scene processor (FIXED: NO PREMATURE DELETION)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -279,6 +280,7 @@ def process_single_scene(
         # 1. Identify Character/Avatar ID for this scene
         character_list = scene.get('characters_in_scene')
         
+        # --- Safely extract the character name ---
         target_char_name = character_list[0] if character_list and len(character_list) > 0 else None
         
         if not target_char_name:
@@ -286,6 +288,7 @@ def process_single_scene(
             
         char_data = character_faces.get(target_char_name, {})
         avatar_id = char_data.get("heygen_avatar_id") 
+        # -------------------------------------------------------
         
         # --- SAFETY FIX: Ensure Avatar ID exists or fallback ---
         if not avatar_id:
@@ -301,7 +304,7 @@ def process_single_scene(
         if audio_path and os.path.exists(audio_path):
             cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
             
-        if not cloud_audio_url:
+        if not cloud_audio_url and (avatar_id or index > 0):
              logging.warning(f"Scene {index} skipped as required audio/avatar is missing.")
              return {"index": index, "video_path": None, "status": "skipped"}
 
@@ -322,21 +325,21 @@ def process_single_scene(
         temp_video_path = os.path.join(temp_dir, f"scene_gen_{index}.mp4")
         download_to_file(str(video_url), temp_video_path, timeout=300)
 
+        # --- CRITICAL FIX: DO NOT DELETE TEMP_DIR HERE ---
+        # The file is needed for the stitching phase.
+        
         return {"index": index, "video_path": temp_video_path, "status": "success"}
 
     except Exception as e:
-        # CRITICAL: Log error but do not crash worker logic here; let main task handle failure count
         logging.error(f"Scene {index} failed: {traceback.format_exc()}")
-        return {"index": index, "video_path": None, "status": "failed"}
-    finally:
-         if os.path.exists(temp_dir): 
-             # Only remove if success to allow debug on failure if needed, 
-             # but to keep it clean we remove.
+        # We can clean up if it failed
+        if os.path.exists(temp_dir): 
              try: shutil.rmtree(temp_dir)
              except Exception as e: logging.warning(f"Failed to clean up temp dir {temp_dir}: {e}")
+        return {"index": index, "video_path": None, "status": "failed"}
 
 # -------------------------
-# Stitching (FIXED FOR ROBUSTNESS)
+# Stitching (Kept & Optimized)
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     request_id = str(uuid.uuid4())
@@ -344,19 +347,22 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
     os.makedirs(temp_dir, exist_ok=True)
     input_list_path = os.path.join(temp_dir, "inputs.txt")
     chunk_paths = []
-    
     try:
-        logging.info(f"Processing {len(scene_pairs)} pairs for stitching...")
+        logging.info(f"Processing {len(scene_pairs)} pairs for stitching")
         for i, (video, audio) in enumerate(scene_pairs):
+            if not os.path.exists(video):
+                logging.error(f"Stitching failed: Input video file missing: {video}")
+                continue
+
             chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
             audio_dur = get_media_duration(audio)
-            if audio_dur == 0: continue
+            
+            # Use 5 seconds if audio duration fails (fallback)
+            if audio_dur == 0: audio_dur = 5.0
             
             # --- CRITICAL STITCHING FIX ---
-            # Using a complex filter to enforce a standard 1080x1920 (9:16) or 1280x720 (16:9)
+            # Using a complex filter to enforce a standard 1080x1920 (9:16)
             # This prevents the "Exit Status 254" caused by resolution mismatch in concats.
-            # We assume 9:16 vertical video for mobile reels as default.
-            
             cmd = [
                 "ffmpeg", "-y", 
                 "-stream_loop", "-1", "-i", video, 
@@ -382,7 +388,7 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                 continue
 
         if not chunk_paths: 
-            logging.error("No chunks were successfully created.")
+            logging.error("No chunks were successfully created for stitching.")
             return False
 
         with open(input_list_path, "w") as f:
@@ -390,15 +396,13 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                 abs_path = os.path.abspath(chunk).replace("'", "'\\''")
                 f.write(f"file '{abs_path}'\n")
 
-        # Final Concat
         subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", input_list_path, "-c", "copy", output_path
         ], check=True, capture_output=True)
-        
         return True
     except Exception as e:
-        logging.error(f"Stitching critical error: {e}")
+        logging.error(f"Stitching error: {e}")
         return False
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
@@ -440,6 +444,7 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
         uploaded_assets_context="User uploaded images present" if form_data.get("uploaded_images") else "No uploads",
         max_scenes=str(target_scenes)
     )
+    # CRITICAL: Tell LLM the new long-form goal and required data
     prompt += f"\n\nIMPORTANT: The 'audio_narration' across all scenes MUST total at least 150 words (60+ seconds total length). Generate exactly {target_scenes} scenes. For dialogue, explicitly start the narration with the character name followed by a colon (e.g., KABIR: Hello. ZARA: Hi.). ALSO, include a 'duration_seconds' of 6 to 10 seconds for EACH scene object."
     raw = get_openai_response(prompt, temperature=0.6, is_json=True)
     obj = extract_json_from_text(raw) or (json.loads(raw) if raw else {})
@@ -476,10 +481,12 @@ def refine_script_with_roles(storyboard: dict, form_data: dict, char_faces: dict
         
     return segments
 
+# Function to generate a thumbnail using the image model (UPDATED FOR HIGH QUALITY)
 def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Optional[str]:
     summary = storyboard.get("video_description") or "Video"
     video_title = storyboard.get("video_title") or "New Video"
     
+    # NEW CINEMATIC POSTER PROMPT
     cinematic_prompt = (
         f"Movie poster style for channel The Apex Archive, titled '{video_title}'. "
         f"Epic cinematic shot: {summary}, deep shadows, volumetric lighting, "
@@ -488,6 +495,7 @@ def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Opt
     negative_prompt = "blurry, poor detail, cartoon, low contrast, text, signature, low resolution"
     
     try: 
+        # Pass the enhanced cinematic prompt and negative prompt
         return generate_flux_image(cinematic_prompt, aspect=orientation, negative_prompt=negative_prompt)
     except: 
         return None
@@ -516,7 +524,6 @@ def background_generate_video(self, form_data: dict):
     logging.info(f"[{task_id}] SaaS Task started.")
     if not HEYGEN_AVAILABLE:
         logging.error("Task aborted: HeyGen client is not configured.")
-        # Return clean error dict to prevent Worker crash loop
         return {"status": "error", "message": "HeyGen client not available"}
 
     try:
@@ -537,7 +544,6 @@ def background_generate_video(self, form_data: dict):
                     valid_avatar_id = avatars[0].get("avatar_id")
                     logging.info(f"✅ Auto-selected valid avatar ID: {valid_avatar_id}")
             
-            # Use Fallback if fetch failed or returned empty
             if not valid_avatar_id:
                 logging.warning("⚠️ No avatars found in account. Using SAFE fallback.")
                 valid_avatar_id = SAFE_FALLBACK_AVATAR_ID
@@ -651,7 +657,6 @@ def background_generate_video(self, form_data: dict):
         
         success = stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path)
         if not success: 
-            logging.error("Optimized stitching returned False.")
             return {"status": "error", "message": "Stitching failed during final assembly."}
         
         # Final audio mix
