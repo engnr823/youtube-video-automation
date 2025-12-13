@@ -11,14 +11,15 @@ from typing import Optional, Dict, Any, List
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
 HEYGEN_BASE_URL = "https://api.heygen.com"
 
-# Increased polling interval to be safe
+# Safe "Lite" Avatar that works on Free/Paid plans (Josh Lite)
+SAFE_AVATAR_ID = "josh_lite3_20230714" 
+
+# Increased polling settings
 POLL_INTERVAL = 10       
 MAX_WAIT_TIME = 600      # 10 minutes
 
 logging.basicConfig(level=logging.INFO)
-
-# LOGGING PROOF THAT NEW CODE IS ACTIVE
-logging.info("*** NEW HEYGEN CLIENT CODE LOADED (v5-DYNAMIC) ***")
+logging.info("*** NEW HEYGEN CLIENT CODE LOADED (v6-ROBUST) ***")
 
 class HeyGenError(Exception):
     pass
@@ -27,7 +28,10 @@ class HeyGenError(Exception):
 # LOW LEVEL REQUEST HANDLER
 # -------------------------------------------------
 
-def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict[str, Any]:
+def _request(method: str, endpoint: str, payload: Optional[Dict] = None, timeout: int = 120) -> Dict[str, Any]:
+    """
+    Sends HTTP requests with extended timeout and error handling.
+    """
     if not HEYGEN_API_KEY:
         raise HeyGenError("HEYGEN_API_KEY is missing")
 
@@ -42,7 +46,7 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
             url=f"{HEYGEN_BASE_URL}{endpoint}",
             headers=headers,
             json=payload,
-            timeout=60
+            timeout=timeout  # Increased default timeout
         )
         
         # Handle 404 gracefully during status checks
@@ -54,13 +58,19 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
             try:
                 err_data = response.json()
                 msg = err_data.get("error", {}).get("message") or err_data.get("message")
+                # Specific check for Avatar Not Found to allow fallback logic
+                if "not found" in str(msg).lower():
+                    raise HeyGenError(f"AVATAR_NOT_FOUND: {msg}")
                 logging.error(f"HeyGen API Error: {msg}")
-            except:
+            except Exception as e:
+                if isinstance(e, HeyGenError): raise e
                 logging.error(f"HeyGen Raw Error: {response.text}")
         
         response.raise_for_status()
         return response.json()
 
+    except HeyGenError:
+        raise
     except Exception as e:
         # Swallow 404 errors during status checks so we can retry
         if "404" in str(e) and "status" in endpoint:
@@ -68,26 +78,30 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
         raise HeyGenError(f"HeyGen Error: {str(e)}")
 
 # -------------------------------------------------
-# NEW: DYNAMIC AVATAR FETCHER
+# ROBUST AVATAR FETCHER
 # -------------------------------------------------
 def get_all_avatars() -> List[Dict]:
     """
-    Fetches the list of available avatars from the user's HeyGen account.
-    Returns a list of avatar dictionaries.
+    Fetches the list of available avatars with retries.
+    Returns a list of avatar dictionaries or a fallback list if API fails.
     """
-    try:
-        logging.info("Fetching available avatars from HeyGen...")
-        # V2 Endpoint for listing avatars
-        data = _request("GET", "/v2/avatars")
-        if not data: return []
-        
-        # The structure is usually { "data": { "avatars": [...] } }
-        avatars = data.get("data", {}).get("avatars", [])
-        logging.info(f"✅ Found {len(avatars)} avatars in account.")
-        return avatars
-    except Exception as e:
-        logging.error(f"Failed to list avatars: {e}")
-        return []
+    retries = 2
+    for attempt in range(retries + 1):
+        try:
+            logging.info(f"Fetching available avatars from HeyGen (Attempt {attempt+1})...")
+            data = _request("GET", "/v2/avatars", timeout=120)
+            
+            if data:
+                avatars = data.get("data", {}).get("avatars", [])
+                logging.info(f"✅ Found {len(avatars)} avatars in account.")
+                return avatars
+                
+        except Exception as e:
+            logging.warning(f"Avatar fetch attempt {attempt+1} failed: {e}")
+            time.sleep(2)
+
+    logging.warning("⚠️ Failed to fetch avatars. Returning empty list (Logic will use fallback).")
+    return []
 
 # -------------------------------------------------
 # JOB POLLING (V1 Endpoint Fix)
@@ -95,16 +109,11 @@ def get_all_avatars() -> List[Dict]:
 
 def _wait_for_job(video_id: str) -> str:
     logging.info(f"HeyGen Polling for Video ID: {video_id}")
-    
-    # Wait 15s initially to allow HeyGen to register the ID
     time.sleep(15)
-    
     start = time.time()
     
     while time.time() - start < MAX_WAIT_TIME:
-        # --- CRITICAL FIX: USE V1 ENDPOINT FOR STATUS CHECK ---
-        # The V2 endpoint often returns 404 for specific avatar jobs. 
-        # V1 is more reliable for status polling.
+        # V1 is more reliable for status polling
         data = _request("GET", f"/v1/video_status.get?video_id={video_id}")
         
         if data is None:
@@ -112,7 +121,6 @@ def _wait_for_job(video_id: str) -> str:
             time.sleep(POLL_INTERVAL)
             continue
 
-        # V1 response structure: { "data": { "status": "...", "video_url": "..." } }
         inner = data.get("data", {})
         status = inner.get("status")
 
@@ -140,19 +148,19 @@ def generate_heygen_video(
     background_color: str = "#000000"
 ) -> str:
     
+    # 1. Configuration
     if aspect_ratio == "9:16":
         dimension = {"width": 1080, "height": 1920}
     else:
         dimension = {"width": 1280, "height": 720}
 
-    # Always use standard avatar mode for video generation
+    # 2. Define Character
     character = {
         "type": "avatar",
         "avatar_id": avatar_id,
         "avatar_style": "normal"
     }
-    logging.info(f"Using Standard Avatar mode for ID: {avatar_id}")
-
+    
     payload = {
         "video_inputs": [{
             "character": character,
@@ -162,23 +170,35 @@ def generate_heygen_video(
         "dimension": dimension
     }
 
-    logging.info(f"Submitting HeyGen Job...")
-    response = _request("POST", "/v2/video/generate", payload)
+    # 3. Submit Job (With Auto-Fallback for Invalid IDs)
+    try:
+        logging.info(f"Submitting HeyGen Job for Avatar: {avatar_id}...")
+        response = _request("POST", "/v2/video/generate", payload)
     
+    except HeyGenError as e:
+        # SAFETY NET: If the specific avatar is not found, retry with the SAFE ID
+        if "AVATAR_NOT_FOUND" in str(e) and avatar_id != SAFE_AVATAR_ID:
+            logging.warning(f"🚨 Avatar {avatar_id} failed. Retrying with SAFE AVATAR: {SAFE_AVATAR_ID}")
+            
+            # Update payload to use Safe Avatar
+            payload["video_inputs"][0]["character"]["avatar_id"] = SAFE_AVATAR_ID
+            response = _request("POST", "/v2/video/generate", payload)
+        else:
+            raise e
+
+    # 4. Extract Video ID
     video_id = response.get("data", {}).get("video_id")
     if not video_id:
         video_id = response.get("video_id") or response.get("job_id")
 
     if not video_id: 
-        logging.error(f"Full Response: {response}")
-        raise HeyGenError("No video_id returned")
+        raise HeyGenError("No video_id returned from API")
 
+    # 5. Poll for completion
     return _wait_for_job(video_id)
 
 # -------------------------------------------------
-# AVATAR HELPERS (DEPRECATED BUT KEPT FOR COMPAT)
+# HELPER
 # -------------------------------------------------
-
-def get_stock_avatar(avatar_type: str = "male") -> str:
-    # This is a fallback local map, but we prefer dynamic fetching now.
-    return "Avatar_Expressive_20240520_02"
+def get_safe_fallback_id():
+    return SAFE_AVATAR_ID
