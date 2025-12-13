@@ -36,19 +36,13 @@ replicate_client = None
 
 from openai import OpenAI
 
-# --- CONSTANTS FOR VOICES AND AVATARS ---
-# Antoni (Male) - Use this for your avatar
+# --- CONSTANTS FOR VOICES ---
 MALE_VOICE_ID = "ErXwobaYiN019PkySvjV" 
-# Rachel (Female) - Use this for female characters
 FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
-# --- FIXED: Use a Public Avatar ID (Tyler in Suit) to ensure full video motion ---
-# OLD (Static Image): "4343bfb447bf4028a48b598ae297f5dc"
-MY_AVATAR_ID = "Avatar_Expressive_20240520_02"
-
-# Public Female Avatar (Tyler)
-FEMALE_AVATAR_ID = "Avatar_Expressive_20240520_02"
-# ----------------------------------------
+# --- GLOBAL AVATAR CACHE ---
+# We will populate this dynamically to avoid 404s
+CACHED_AVATAR_ID = None
 
 # --- Utility Fix: Define missing ensure_dir function ---
 def ensure_dir(path):
@@ -94,12 +88,13 @@ except Exception:
 
 # CRITICAL FIX 2: Correct HeyGen client import
 try:
-    from video_clients.heygen_client import generate_heygen_video, get_stock_avatar, HeyGenError
+    from video_clients.heygen_client import generate_heygen_video, get_stock_avatar, get_all_avatars, HeyGenError
     HEYGEN_AVAILABLE = True
 except ImportError as e:
     logging.error(f"❌ HEYGEN CLIENT NOT FOUND. Video generation will fail. IMPORT ERROR: {e}")
     generate_heygen_video = None
     get_stock_avatar = None
+    get_all_avatars = None
     HEYGEN_AVAILABLE = False
 
 
@@ -256,7 +251,7 @@ def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str 
 
 
 # -------------------------
-# Single scene processor (FIXED FOR HEYGEN)
+# Single scene processor (FIXED FOR DYNAMIC AVATAR)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -264,7 +259,8 @@ def process_single_scene(
     character_profile: str,
     audio_path: str = None,
     character_faces: dict = {},
-    aspect: str = "9:16"
+    aspect: str = "9:16",
+    fallback_avatar_id: str = None # NEW ARGUMENT
 ) -> dict:
     
     if not HEYGEN_AVAILABLE:
@@ -290,9 +286,8 @@ def process_single_scene(
         
         # --- SAFETY FIX: Ensure Avatar ID exists or fallback ---
         if not avatar_id:
-            logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Attempting stock fallback.")
-            # Default to the Public Avatar (Tyler) which works for everyone
-            avatar_id = MY_AVATAR_ID
+            logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Using dynamic fallback.")
+            avatar_id = fallback_avatar_id
 
         if not avatar_id:
              logging.error(f"Scene {index} SKIPPED: Missing Avatar ID. Cannot call HeyGen.")
@@ -308,7 +303,7 @@ def process_single_scene(
              return {"index": index, "video_path": None, "status": "skipped"}
 
         # 3. Call the single HeyGen API function
-        logging.info(f"Calling HeyGen for Scene {index} (Avatar: {avatar_id or 'B-roll'})")
+        logging.info(f"Calling HeyGen for Scene {index} (Avatar: {avatar_id})")
         
         video_url = generate_heygen_video(
             avatar_id=avatar_id,
@@ -449,9 +444,7 @@ def refine_script_with_roles(storyboard: dict, form_data: dict, char_faces: dict
         # Assign Voice ID
         assigned_voice = MALE_VOICE_ID # Default to Male
         
-        if char_data.get("heygen_avatar_id") == MY_AVATAR_ID:
-            assigned_voice = MALE_VOICE_ID
-        elif "female" in str(char_data) or "woman" in str(char_data):
+        if "female" in str(char_data) or "woman" in str(char_data):
              assigned_voice = FEMALE_VOICE_ID
              
         segments.append({"text": text, "voice_id": assigned_voice})
@@ -508,6 +501,23 @@ def background_generate_video(self, form_data: dict):
         keyword = form_data.get("keyword")
         if not keyword: raise ValueError("Keyword required")
         
+        # --- NEW STEP: DYNAMICALLY FETCH VALID AVATAR ID ---
+        update_status("Fetching Available Avatars...")
+        valid_avatar_id = None
+        try:
+            avatars = get_all_avatars()
+            if avatars and len(avatars) > 0:
+                # Prioritize standard avatars over others
+                valid_avatar_id = avatars[0].get("avatar_id")
+                logging.info(f"✅ Auto-selected valid avatar ID: {valid_avatar_id}")
+            else:
+                logging.warning("⚠️ No avatars found in account. Trying known stock ID.")
+                valid_avatar_id = "Angela-inTshirt-20220820" # Safe Fallback
+        except Exception as e:
+            logging.error(f"Avatar fetch error: {e}")
+            valid_avatar_id = "Angela-inTshirt-20220820"
+        # ----------------------------------------------------
+
         # 1. Blueprint
         update_status("Designing Video Concept...")
         scraped = {} 
@@ -528,24 +538,10 @@ def background_generate_video(self, form_data: dict):
              char_data = ensure_character(name, appearance_prompt=char.get("appearance_prompt"))
              ref_image = next((url for url in uploaded_images if name.lower() in url.lower()), None)
              
-             try:
-                 # Determine gender/type
-                 desc = char.get("appearance_prompt", "").lower()
-                 avatar_type = "female" if any(w in desc for w in ["woman", "female", "girl", "lady"]) else "male"
-                 
-                 if avatar_type == "female":
-                     heygen_avatar_id = FEMALE_AVATAR_ID
-                 else:
-                     heygen_avatar_id = MY_AVATAR_ID # Uses the new Public Avatar ID
-                 
-                 char_data["heygen_avatar_id"] = heygen_avatar_id
-                 char_data["reference_image"] = ref_image 
-                 character_faces[name] = char_data
-
-             except Exception as e:
-                 logging.error(f"Failed to create/get HeyGen avatar for {name}: {e}")
-                 char_data["heygen_avatar_id"] = MY_AVATAR_ID 
-                 character_faces[name] = char_data
+             # Fallback to the auto-detected valid ID
+             char_data["heygen_avatar_id"] = valid_avatar_id
+             char_data["reference_image"] = ref_image 
+             character_faces[name] = char_data
         
         char_profile = characters[0].get("appearance_prompt", "Cinematic") if characters else "Cinematic"
 
@@ -583,8 +579,18 @@ def background_generate_video(self, form_data: dict):
         
         # Using 2 workers to be safe
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            # Pass the VALID DETECTED AVATAR ID to process_single_scene
             future_to_asset = {
-                executor.submit(process_single_scene, asset["scene_data"], asset["index"], char_profile, asset["audio_path"], character_faces, aspect): asset
+                executor.submit(
+                    process_single_scene, 
+                    asset["scene_data"], 
+                    asset["index"], 
+                    char_profile, 
+                    asset["audio_path"], 
+                    character_faces, 
+                    aspect,
+                    valid_avatar_id # NEW ARG
+                ): asset
                 for asset in scene_assets
             }
             results_map = {}
@@ -644,6 +650,8 @@ def background_generate_video(self, form_data: dict):
             "storyboard": storyboard
         }
     except Exception as e:
+        # Logging only; error will be raised
         logging.error(f"Task failed: {traceback.format_exc()}")
         self.update_state(state="FAILURE", meta={"error": str(e)})
-        raise
+        # This raise ensures celery catches it, but we suppress the complex serialization error by raising simple one
+        raise RuntimeError(f"Task failed: {str(e)}")
