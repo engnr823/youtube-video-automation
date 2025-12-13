@@ -296,7 +296,8 @@ def process_single_scene(
                 if get_stock_avatar:
                     avatar_id = get_stock_avatar("male") 
                 else:
-                    avatar_id = "4343bfb447bf4028a48b598ae297f5dc"
+                    # UPDATED FALLBACK TO SAFE PUBLIC AVATAR
+                    avatar_id = "Avatar_Expressive_20240520_01"
             except:
                 pass
 
@@ -558,7 +559,8 @@ def background_generate_video(self, form_data: dict):
                  if get_stock_avatar:
                      heygen_avatar_id = get_stock_avatar(avatar_type)
                  else:
-                     heygen_avatar_id = "4343bfb447bf4028a48b598ae297f5dc" # Default male
+                     # UPDATED FALLBACK TO SAFE PUBLIC AVATAR
+                     heygen_avatar_id = "Avatar_Expressive_20240520_01" 
                  
                  char_data["heygen_avatar_id"] = heygen_avatar_id
                  char_data["reference_image"] = ref_image 
@@ -567,7 +569,8 @@ def background_generate_video(self, form_data: dict):
              except Exception as e:
                  logging.error(f"Failed to create/get HeyGen avatar for {name}: {e}")
                  # Critical Fallback to prevent 400 error later
-                 char_data["heygen_avatar_id"] = "4343bfb447bf4028a48b598ae297f5dc"
+                 # UPDATED FALLBACK TO SAFE PUBLIC AVATAR
+                 char_data["heygen_avatar_id"] = "Avatar_Expressive_20240520_01"
                  character_faces[name] = char_data
              # -----------------------------------------------------------------
         
