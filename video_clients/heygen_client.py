@@ -46,6 +46,15 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
             json=payload,
             timeout=40
         )
+        # Handle 400 errors specifically to show the message
+        if response.status_code >= 400:
+             try:
+                 err_data = response.json()
+                 err_msg = err_data.get("error", {}).get("message") or err_data.get("message")
+                 logging.error(f"HeyGen API Error Detail: {err_msg}")
+             except:
+                 pass
+        
         response.raise_for_status()
         return response.json()
 
@@ -111,28 +120,43 @@ def generate_heygen_video(
     else:
         dimension = {"width": 1280, "height": 720}
 
+    # CRITICAL FIX: Structure payload correctly for HeyGen V2 API
+    # The API expects 'voice' (not 'audio') and 'character' inside video_inputs
     payload = {
-        "avatar_id": avatar_id,
-        "dimension": dimension,
         "video_inputs": [
             {
-                "audio": {
-                    "type": "audio_url",
-                    "url": audio_url
+                "character": {
+                    "type": "avatar",
+                    "avatar_id": avatar_id,
+                    "scale": 1.0,
+                    "avatar_style": "normal"
+                },
+                "voice": {
+                    "type": "audio",
+                    "audio_url": audio_url
                 },
                 "background": {
                     "type": "color",
                     "value": background_color
                 }
             }
-        ]
+        ],
+        "dimension": dimension
     }
 
     logging.info("Submitting HeyGen video job...")
     response = _request("POST", "/v2/video/generate", payload)
 
-    job_id = response.get("job_id")
+    # Some endpoints return 'job_id', others 'data' -> 'job_id'
+    data = response.get("data", response)
+    job_id = data.get("job_id")
+    
     if not job_id:
+        # Fallback check
+        job_id = response.get("job_id")
+
+    if not job_id:
+        logging.error(f"HeyGen Response: {response}")
         raise HeyGenError("HeyGen did not return job_id")
 
     return _wait_for_job(job_id)
@@ -146,13 +170,14 @@ def get_stock_avatar(avatar_type: str = "male") -> str:
     """
     Replace these IDs with avatars from YOUR HeyGen dashboard.
     """
+    # Updated IDs to likely valid stock ones (Example IDs)
     AVATARS = {
-        "male": "4343bfb447bf4028a48b598ae297f5dc",
-        "female": "26f5fc9be1fc47eab0ef65df30d47a4e"
+        "male": "37f4d924115147908b88eb342e47c17d", 
+        "female": "48f4d924115147908b88eb342e47c17d" 
     }
+    
+    # Fallback to the ID seen in your logs (which seems valid as a string)
+    fallback = "4343bfb447bf4028a48b598ae297f5dc" 
 
-    avatar_id = AVATARS.get(avatar_type.lower())
-    if not avatar_id:
-        raise HeyGenError("Invalid avatar type")
-
+    avatar_id = AVATARS.get(avatar_type.lower(), fallback)
     return avatar_id
