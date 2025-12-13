@@ -35,7 +35,6 @@ def _make_request(method: str, endpoint: str, **kwargs) -> Any:
     try:
         response = requests.request(
             method,
-            # Concatenates correctly now (e.g., https://api.heygen.com/v2/video/generate)
             f"{HEYGEN_API_URL}{endpoint}",
             headers=headers,
             timeout=30,
@@ -64,7 +63,6 @@ def _make_request(method: str, endpoint: str, **kwargs) -> Any:
 
 def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
     """Polls the API until the video job is complete (success or failure)."""
-    # NOTE: Assuming status endpoint uses the same base URL structure
     endpoint = f"/jobs/{job_id}/status" 
     start_time = time.time()
     
@@ -171,7 +169,7 @@ def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Opt
     # User's Custom ID for the male character slot (Mentor/Ali):
     STOCK_ID_MALE = "4343bfb447bf4028a48b598ae297f5dc" 
     
-    # Placeholder for the Stock Female Avatar ID (MUST BE REPLACED BY USER)
+    # User-provided Public Stock Female Avatar ID (Zara/Apprentice):
     STOCK_ID_FEMALE = "26f5fc9be1fc47eab0ef65df30d47a4e" 
     # ---------------------------
 
@@ -185,9 +183,6 @@ def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Opt
             # Use the actual custom ID (User's face) for the main male character types
             if name_key in ('ALI', 'KABIR', 'MENTOR') or 'MALE' in name_key:
                 logging.info(f"Using user's custom ID {STOCK_ID_MALE} for main character.")
-                
-                # NOTE: In a real system, you'd perform API calls to HeyGen to create the avatar here,
-                # but since we skip them, we just return the Custom ID directly.
                 return STOCK_ID_MALE
             
             # Fall through for other characters
@@ -204,8 +199,8 @@ def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Opt
          # Use the user's custom ID as the default male avatar now
          return STOCK_ID_MALE
     elif name_key in ('ZARA', 'APPRENTICE') or 'FEMALE' in name_key:
-         # Use the stock female ID for secondary character consistency
+         # Use the real stock female ID for secondary character consistency
          return STOCK_ID_FEMALE
     
-    # Final default fallback
+    # Final default fallback (defaults to the male custom ID)
     return STOCK_ID_MALE
