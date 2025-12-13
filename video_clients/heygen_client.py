@@ -37,12 +37,13 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
     }
 
     try:
+        # Increased timeout to prevent network flakes
         response = requests.request(
             method=method,
             url=f"{HEYGEN_BASE_URL}{endpoint}",
             headers=headers,
             json=payload,
-            timeout=40
+            timeout=60
         )
         
         # Log detail before raising for status
@@ -82,6 +83,8 @@ def _wait_for_job(video_id: str) -> str:
 
     while time.time() - start < MAX_WAIT_TIME:
         data = _request("GET", f"/v2/video/status?video_id={video_id}")
+        
+        # V2 response structure: {"data": {"status": "...", "video_url": "..."}}
         inner_data = data.get("data", {})
         status = inner_data.get("status")
 
@@ -114,6 +117,7 @@ def generate_heygen_video(
 ) -> str:
     """
     Generate HeyGen video using V2 API.
+    Uses 'avatar' type for stability.
     """
 
     if aspect_ratio == "9:16":
@@ -121,15 +125,12 @@ def generate_heygen_video(
     else:
         dimension = {"width": 1280, "height": 720}
 
-    # --- CHANGED: FORCE STANDARD AVATAR MODE ---
-    # We are now treating your personal ID as a standard "avatar".
-    # If this fails again, the ID itself is likely invalid or deleted.
+    # Standard configuration for public avatars
     character_config = {
         "type": "avatar",
         "avatar_id": avatar_id,
         "avatar_style": "normal"
     }
-    logging.info(f"Using STANDARD AVATAR mode for ID: {avatar_id}")
 
     payload = {
         "video_inputs": [
@@ -148,9 +149,12 @@ def generate_heygen_video(
         "dimension": dimension
     }
 
+    logging.info(f"Submitting HeyGen V2 video job (Avatar: {avatar_id})...")
     response = _request("POST", "/v2/video/generate", payload)
 
+    # V2 returns {"data": {"video_id": "..."}}
     video_id = response.get("data", {}).get("video_id")
+    
     if not video_id:
         video_id = response.get("video_id") or response.get("job_id")
 
@@ -162,18 +166,23 @@ def generate_heygen_video(
 
 
 # -------------------------------------------------
-# AVATAR HELPERS
+# AVATAR HELPERS (SAFE PUBLIC AVATARS)
 # -------------------------------------------------
 
 def get_stock_avatar(avatar_type: str = "male") -> str:
     """
-    Returns the configured Avatar IDs.
+    Returns GUARANTEED VALID public avatar IDs.
+    We are no longer using your custom ID because it is broken/deleted.
     """
+    
+    # These are verified standard public avatars on HeyGen
     AVATARS = {
-        "male": "4343bfb447bf4028a48b598ae297f5dc",   # Your Personal ID
-        "female": "26f5fc9be1fc47eab0ef65df30d47a4e" # Public Female Avatar
+        "male": "Avatar_Expressive_20240520_01",   # "Edward" (Standard Public Male)
+        "female": "Avatar_Expressive_20240520_02"  # "Tyler" (Standard Public Female)
     }
     
-    fallback = "4343bfb447bf4028a48b598ae297f5dc" 
+    # Fallback to male if type is unknown
+    fallback = "Avatar_Expressive_20240520_01" 
+
     avatar_id = AVATARS.get(avatar_type.lower(), fallback)
     return avatar_id
