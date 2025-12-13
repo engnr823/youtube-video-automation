@@ -18,7 +18,7 @@ MAX_WAIT_TIME = 600      # 10 minutes
 logging.basicConfig(level=logging.INFO)
 
 # LOGGING PROOF THAT NEW CODE IS ACTIVE
-logging.info("*** NEW HEYGEN CLIENT CODE LOADED (v3) ***")
+logging.info("*** NEW HEYGEN CLIENT CODE LOADED (v4-FIXED) ***")
 
 class HeyGenError(Exception):
     pass
@@ -45,7 +45,7 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
             timeout=60
         )
         
-        # --- CRITICAL FIX: Handle 404 on Status Checks ---
+        # Handle 404 gracefully during status checks
         if response.status_code == 404 and "status" in endpoint:
             logging.warning(f"Status 404 for {endpoint}. Job might be initializing. Retrying...")
             return None
@@ -68,7 +68,7 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
         raise HeyGenError(f"HeyGen Error: {str(e)}")
 
 # -------------------------------------------------
-# JOB POLLING (With Retry)
+# JOB POLLING (With V1 Endpoint Fix)
 # -------------------------------------------------
 
 def _wait_for_job(video_id: str) -> str:
@@ -80,14 +80,17 @@ def _wait_for_job(video_id: str) -> str:
     start = time.time()
     
     while time.time() - start < MAX_WAIT_TIME:
-        data = _request("GET", f"/v2/video/status?video_id={video_id}")
+        # --- CRITICAL FIX: USE V1 ENDPOINT FOR STATUS CHECK ---
+        # The V2 endpoint often returns 404 for specific avatar jobs. 
+        # V1 is more reliable for status polling.
+        data = _request("GET", f"/v1/video_status.get?video_id={video_id}")
         
-        # If None, it means 404 (Not Found yet), so wait and retry
         if data is None:
             logging.info(f"Video {video_id} not found yet... waiting.")
             time.sleep(POLL_INTERVAL)
             continue
 
+        # V1 response structure: { "data": { "status": "...", "video_url": "..." } }
         inner = data.get("data", {})
         status = inner.get("status")
 
@@ -120,20 +123,14 @@ def generate_heygen_video(
     else:
         dimension = {"width": 1280, "height": 720}
 
-    # --- FORCE TALKING PHOTO MODE FOR YOUR ID ---
-    if "4343" in str(avatar_id):
-        character = {
-            "type": "talking_photo",
-            "talking_photo_id": "4343bfb447bf4028a48b598ae297f5dc"
-        }
-        logging.info(f"*** FORCING TALKING PHOTO MODE for ID {avatar_id} ***")
-    else:
-        character = {
-            "type": "avatar",
-            "avatar_id": avatar_id,
-            "avatar_style": "normal"
-        }
-        logging.info(f"Using Standard Avatar mode for ID: {avatar_id}")
+    # --- CRITICAL FIX: REMOVED FORCED "TALKING PHOTO" MODE ---
+    # We now always use the standard avatar mode, which supports full video generation.
+    character = {
+        "type": "avatar",
+        "avatar_id": avatar_id,
+        "avatar_style": "normal"
+    }
+    logging.info(f"Using Standard Avatar mode for ID: {avatar_id}")
 
     payload = {
         "video_inputs": [{
@@ -163,7 +160,7 @@ def generate_heygen_video(
 
 def get_stock_avatar(avatar_type: str = "male") -> str:
     AVATARS = {
-        "male": "4343bfb447bf4028a48b598ae297f5dc",
-        "female": "Avatar_Expressive_20240520_02"
+        "male": "Avatar_Expressive_20240520_02", # Tyler (Public)
+        "female": "Avatar_Expressive_20240520_02" # Rachel (Public) - Change if you have a specific female ID
     }
-    return AVATARS.get(avatar_type.lower(), "4343bfb447bf4028a48b598ae297f5dc")
+    return AVATARS.get(avatar_type.lower(), "Avatar_Expressive_20240520_02")
