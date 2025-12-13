@@ -42,8 +42,10 @@ MALE_VOICE_ID = "ErXwobaYiN019PkySvjV"
 # Rachel (Female) - Use this for female characters
 FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
-# Your Personal Avatar ID (Talking Photo)
-MY_AVATAR_ID = "4343bfb447bf4028a48b598ae297f5dc"
+# --- FIXED: Use a Public Avatar ID (Tyler in Suit) to ensure full video motion ---
+# OLD (Static Image): "4343bfb447bf4028a48b598ae297f5dc"
+MY_AVATAR_ID = "Avatar_Expressive_20240520_02"
+
 # Public Female Avatar (Tyler)
 FEMALE_AVATAR_ID = "Avatar_Expressive_20240520_02"
 # ----------------------------------------
@@ -248,14 +250,13 @@ def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str 
     Used primarily for initial character casting and thumbnail generation.
     """
     logging.warning("⚠️ Using conceptual image generation. Replace this with a working image API call.")
-    # Fallback to a placeholder URL in the absence of a working API to allow the pipeline to proceed
     if 'old man' in prompt.lower() or 'mentor' in prompt.lower():
-        return "https://placeimg.com/480/832/people" # Placeholder for Mentor
+        return "https://placeimg.com/480/832/people" 
     return "https://placeimg.com/480/832/abstract"
 
 
 # -------------------------
-# Single scene processor (REWRITTEN FOR HEYGEN CONCEPT)
+# Single scene processor (FIXED FOR HEYGEN)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -290,7 +291,7 @@ def process_single_scene(
         # --- SAFETY FIX: Ensure Avatar ID exists or fallback ---
         if not avatar_id:
             logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Attempting stock fallback.")
-            # Default to YOUR valid ID
+            # Default to the Public Avatar (Tyler) which works for everyone
             avatar_id = MY_AVATAR_ID
 
         if not avatar_id:
@@ -312,8 +313,8 @@ def process_single_scene(
         video_url = generate_heygen_video(
             avatar_id=avatar_id,
             audio_url=cloud_audio_url,
-            aspect_ratio=aspect, # e.g., "9:16"
-            background_color="#000000" # Black is safer than white for most videos
+            aspect_ratio=aspect, 
+            background_color="#000000"
         )
 
         if not video_url:
@@ -419,7 +420,6 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
         uploaded_assets_context="User uploaded images present" if form_data.get("uploaded_images") else "No uploads",
         max_scenes=str(target_scenes)
     )
-    # CRITICAL: Tell LLM the new long-form goal and required data
     prompt += f"\n\nIMPORTANT: The 'audio_narration' across all scenes MUST total at least 150 words (60+ seconds total length). Generate exactly {target_scenes} scenes. For dialogue, explicitly start the narration with the character name followed by a colon (e.g., KABIR: Hello. ZARA: Hi.). ALSO, include a 'duration_seconds' of 6 to 10 seconds for EACH scene object."
     raw = get_openai_response(prompt, temperature=0.6, is_json=True)
     obj = extract_json_from_text(raw) or (json.loads(raw) if raw else {})
@@ -458,12 +458,10 @@ def refine_script_with_roles(storyboard: dict, form_data: dict, char_faces: dict
         
     return segments
 
-# Function to generate a thumbnail using the image model (UPDATED FOR HIGH QUALITY)
 def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Optional[str]:
     summary = storyboard.get("video_description") or "Video"
     video_title = storyboard.get("video_title") or "New Video"
     
-    # NEW CINEMATIC POSTER PROMPT
     cinematic_prompt = (
         f"Movie poster style for channel The Apex Archive, titled '{video_title}'. "
         f"Epic cinematic shot: {summary}, deep shadows, volumetric lighting, "
@@ -472,7 +470,6 @@ def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Opt
     negative_prompt = "blurry, poor detail, cartoon, low contrast, text, signature, low resolution"
     
     try: 
-        # Pass the enhanced cinematic prompt and negative prompt
         return generate_flux_image(cinematic_prompt, aspect=orientation, negative_prompt=negative_prompt)
     except: 
         return None
@@ -511,39 +508,35 @@ def background_generate_video(self, form_data: dict):
         keyword = form_data.get("keyword")
         if not keyword: raise ValueError("Keyword required")
         
-        # 1. Blueprint (Remains the same)
+        # 1. Blueprint
         update_status("Designing Video Concept...")
-        scraped = {} # Mocked
-        blueprint = {} # Mocked
+        scraped = {} 
+        blueprint = {} 
         
         storyboard = create_video_storyboard_agent(keyword, blueprint, form_data)
         scenes = storyboard.get("scenes", [])
         if not scenes: raise RuntimeError("Failed to generate scenes.")
 
-        # 2. Casting & Character Data Enrichment (FIXED FOR HEYGEN CONSISTENCY)
+        # 2. Casting & Character Data Enrichment
         update_status("Casting Characters...")
         characters = storyboard.get("characters") or []
         uploaded_images = form_data.get("uploaded_images") or []
         character_faces = {}
         
-        # CRITICAL FIX: Use the new create_or_get_avatar for consistency
         for char in characters:
              name = char.get("name", "Unknown")
              char_data = ensure_character(name, appearance_prompt=char.get("appearance_prompt"))
-             
-             # Find the reference image URL if uploaded by the user
              ref_image = next((url for url in uploaded_images if name.lower() in url.lower()), None)
              
-             # --- REPLACED BROKEN LOGIC WITH WORKING STOCK/FALLBACK LOGIC ---
              try:
-                 # Attempt to determine gender/type from description
+                 # Determine gender/type
                  desc = char.get("appearance_prompt", "").lower()
                  avatar_type = "female" if any(w in desc for w in ["woman", "female", "girl", "lady"]) else "male"
                  
                  if avatar_type == "female":
                      heygen_avatar_id = FEMALE_AVATAR_ID
                  else:
-                     heygen_avatar_id = MY_AVATAR_ID # Default to YOUR ID for males
+                     heygen_avatar_id = MY_AVATAR_ID # Uses the new Public Avatar ID
                  
                  char_data["heygen_avatar_id"] = heygen_avatar_id
                  char_data["reference_image"] = ref_image 
@@ -551,22 +544,18 @@ def background_generate_video(self, form_data: dict):
 
              except Exception as e:
                  logging.error(f"Failed to create/get HeyGen avatar for {name}: {e}")
-                 char_data["heygen_avatar_id"] = MY_AVATAR_ID # Fallback to you
+                 char_data["heygen_avatar_id"] = MY_AVATAR_ID 
                  character_faces[name] = char_data
-             # -----------------------------------------------------------------
         
         char_profile = characters[0].get("appearance_prompt", "Cinematic") if characters else "Cinematic"
 
-        # 3. Audio Synthesis (Remains the same)
+        # 3. Audio Synthesis
         update_status("Synthesizing Audio Dialogue...")
-        
-        # Fix: Pass char_faces to refine_script so it can assign voices correctly
         segments = refine_script_with_roles(storyboard, form_data, character_faces)
         
         scene_assets = []
         full_script_text = ""
         for i, scene in enumerate(scenes):
-            # ... (audio generation and scene_assets creation logic remains) ...
             text = segments[i].get("text") if i < len(segments) else "..."
             voice_id = segments[i].get("voice_id") if i < len(segments) else MALE_VOICE_ID
             if voice_id: voice_id = voice_id.strip(" []'\"")
@@ -574,7 +563,6 @@ def background_generate_video(self, form_data: dict):
             audio_path = None
             if generate_audio_for_scene:
                 try: 
-                    # NOTE: generate_audio_for_scene returns a dict, extract path
                     audio_res = generate_audio_for_scene(text, voice_id)
                     audio_path = audio_res.get("path") if audio_res else None
                 except Exception as e:
@@ -588,20 +576,18 @@ def background_generate_video(self, form_data: dict):
 
         if not scene_assets: raise RuntimeError("Audio generation failed for all scenes.")
 
-        # 4. Rendering (Calls the NEW streamlined process_single_scene)
+        # 4. Rendering
         update_status("Rendering Video Scenes (Streamlined HeyGen Call)...")
         aspect = "9:16" if form_data.get("video_type") == "reel" else "16:9"
         final_pairs = []
         
-        # Increased max_workers to 4-6 can improve throughput, but may cost more.
-        # Sticking to max_workers=2 is safer for low-credit accounts.
+        # Using 2 workers to be safe
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_to_asset = {
                 executor.submit(process_single_scene, asset["scene_data"], asset["index"], char_profile, asset["audio_path"], character_faces, aspect): asset
                 for asset in scene_assets
             }
             results_map = {}
-            # ... (result collection and error handling remains) ...
             for future in concurrent.futures.as_completed(future_to_asset):
                 asset = future_to_asset[future]
                 idx = asset["index"]
@@ -618,7 +604,7 @@ def background_generate_video(self, form_data: dict):
 
         if not final_pairs: raise RuntimeError("Video generation failed.")
 
-        # 5. Stitching (Remains the same with Loudnorm fix)
+        # 5. Stitching
         update_status("Final Assembly (Audio-Video Sync)...")
         music_tone = blueprint.get("tone", "motivational")
         music_url = MUSIC_LIBRARY.get(music_tone, MUSIC_LIBRARY["default"])
@@ -627,17 +613,12 @@ def background_generate_video(self, form_data: dict):
         except: music_path = None
         final_output_path = f"/tmp/final_render_{task_id}.mp4"
         temp_visual_path = f"/tmp/visual_base_{task_id}.mp4"
-        # Assuming you have a process_and_stitch_scenes or similar function available:
-        # success = process_and_stitch_scenes(final_pairs, temp_visual_path)
         
-        # Using the existing stitch_video_audio_pairs_optimized function:
         success = stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path)
         if not success: raise RuntimeError("Stitching failed.")
         
         # Final audio mix
-        # Assuming you have mix_music_and_finalize function available in the scope or use the block below
         if music_path:
-            # Loudnorm / Amix filter complex for balanced audio
             cmd = [
                 "ffmpeg", "-y", "-i", temp_visual_path, "-stream_loop", "-1", "-i", music_path,
                 "-filter_complex", 
@@ -655,8 +636,6 @@ def background_generate_video(self, form_data: dict):
         thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
         metadata = youtube_metadata_agent(full_script_text, keyword, form_data, blueprint)
         
-        # Cleanup (omitted for brevity, assume it remains)
-
         return {
             "status": "ready",
             "video_url": final_video_url,
