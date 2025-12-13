@@ -4,13 +4,16 @@ import os
 import time
 import requests
 import logging
-import uuid # <-- ADDED for generating unique keys/IDs
+import uuid
 from typing import Optional, Any
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+
 # Assuming HeyGen API key is stored in the environment
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
-HEYGEN_API_URL = "https://api.heygen.com/v1" # Example URL
+HEYGEN_API_URL = "https://api.heygen.com/v1" # Base URL
 
 class HeyGenError(Exception):
     """Custom exception for HeyGen API errors."""
@@ -25,6 +28,7 @@ def _make_request(method: str, endpoint: str, **kwargs) -> Any:
     if not HEYGEN_API_KEY:
         raise HeyGenError("HEYGEN_API_KEY is not set.")
     
+    # NOTE: HeyGen V2 requires the API key in the header
     headers = {"X-Api-Key": HEYGEN_API_KEY, "Content-Type": "application/json"}
     
     try:
@@ -39,10 +43,9 @@ def _make_request(method: str, endpoint: str, **kwargs) -> Any:
         return response.json()
     
     except requests.exceptions.HTTPError as e:
-        # Catch specific API errors and raise a clean exception
         status_code = e.response.status_code
         
-        # --- CRITICAL FIX: Robust Error Detail Extraction (Kept) ---
+        # Robust Error Detail Extraction (Critical Fix)
         error_detail = f"API Error {status_code}"
         try:
             error_data = e.response.json()
@@ -59,7 +62,8 @@ def _make_request(method: str, endpoint: str, **kwargs) -> Any:
 
 def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
     """Polls the API until the video job is complete (success or failure)."""
-    endpoint = f"/jobs/{job_id}/status"
+    # NOTE: Polling typically uses a V1 or V2 status endpoint. We use /v1/jobs/{id}/status here.
+    endpoint = f"/jobs/{job_id}/status" 
     start_time = time.time()
     
     while time.time() - start_time < max_wait:
@@ -80,7 +84,7 @@ def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
             
         except HeyGenError as e:
             if "Job failed" in str(e):
-                 raise # Re-raise failure immediately
+                 raise
             logging.warning(f"Polling error for Job {job_id}: {e}")
             
     raise HeyGenError(f"Job {job_id} timed out after {max_wait} seconds.")
@@ -90,28 +94,24 @@ def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
 
 def _upload_image_to_heygen(image_url: str) -> Optional[str]:
     """
-    CONCEPTUAL: Uploads user's image URL to HeyGen's Asset API. 
-    In a real implementation, you would call:
-    1. Download the file from `image_url` (which is a Cloudinary URL from `app.py`).
-    2. Call `_make_request("POST", "/asset/upload", ...)` with the file/bytes.
-    Returns the HeyGen `image_key`.
+    CONCEPTUAL: Uploads user's image URL to HeyGen's Asset API. Returns image_key.
+    This must be a real API call for Custom Avatar Mode to work.
     """
-    logging.warning(f"HEYGEN: Simulating asset upload for {image_url}. REQUIRES REAL API.")
-    # Return a unique mock key for simulation
+    logging.warning(f"HEYGEN: Custom Avatar creation simulated. Requires real Upload Asset API.")
     return "MOCK_IMAGE_KEY_" + str(uuid.uuid4())[:8]
 
 def _create_photo_avatar(name: str, image_key: str) -> Optional[str]:
     """
-    CONCEPTUAL: Creates a HeyGen Photo Avatar Group from an image_key. 
-    In a real implementation, you would call:
-    1. Call `_make_request("POST", "/v2/photo_avatar/avatar_group/create", ...)`
-    Returns the new `avatar_id`.
+    CONCEPTUAL: Creates a HeyGen Photo Avatar Group from an image_key. Returns avatar_id.
+    This must be a real API call for Custom Avatar Mode to work.
     """
-    logging.warning(f"HEYGEN: Simulating Photo Avatar creation for {name}. REQUIRES REAL API.")
-    # Return a unique mock avatar ID for simulation
-    return "AVATAR_GROUP_" + str(uuid.uuid4())[:8]
+    logging.warning(f"HEYGEN: Custom Avatar creation simulated. Requires real Create Photo Avatar Group API.")
+    # Return the user's custom ID immediately for consistency if it's the main character, 
+    # assuming the upload step succeeded conceptually.
+    # NOTE: This logic is simplified for immediate testing.
+    return "AVATAR_GROUP_" + str(uuid.uuid4())[:8] 
 
-# ----------------- MAIN VIDEO GENERATION FUNCTION (Kept) -----------------
+# ----------------- MAIN VIDEO GENERATION FUNCTION (Corrected Endpoint) -----------------
 
 def generate_heygen_video(
     avatar_id: str,
@@ -139,8 +139,8 @@ def generate_heygen_video(
     # 2. Submit Job
     logging.info(f"HeyGen: Submitting job for Avatar ID {avatar_id}...")
     
-    # CRITICAL FIX: Correct endpoint for video generation
-    submission_data = _make_request("POST", "/video.generate", json=request_data.dict())
+    # CRITICAL FIX: Using the /v2/video/generate endpoint which is currently active.
+    submission_data = _make_request("POST", "/v2/video/generate", json=request_data.dict())
     
     job_id = submission_data.get("job_id")
     
@@ -168,27 +168,28 @@ def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Opt
     Handles multi-mode character assignment: Custom Avatar (if image) or Stock Avatar (default).
     """
     
-    # 1. --- CRITICAL: PASTE REAL STOCK AVATAR IDs HERE ---
-    # Find these IDs in your HeyGen dashboard or V2 API docs.
-    STOCK_ID_MALE = "PASTE_YOUR_MALE_STOCK_AVATAR_ID" 
-    STOCK_ID_FEMALE = "PASTE_YOUR_FEMALE_STOCK_AVATAR_ID" 
-    # --------------------------------------------------------
+    # 1. --- FINAL AVATAR IDs ---
+    # User's Custom ID for the male character slot:
+    STOCK_ID_MALE = "4343bfb447bf4028a48b598ae297f5dc" 
+    
+    # Placeholder for the Stock Female Avatar ID (MUST BE REPLACED BY USER)
+    STOCK_ID_FEMALE = "a219b12e32f74e6c98c1998f4806a66a" 
+    # ---------------------------
 
     # 2. Custom Avatar Mode (User Uploaded Image)
     if ref_image and ref_image.startswith("http"):
         try:
             logging.info(f"Custom Avatar Mode: Attempting creation for {char_name}.")
-            # Step 1: Upload the asset (returns HeyGen internal key)
-            image_key = _upload_image_to_heygen(ref_image)
             
-            # Step 2: Create the Photo Avatar Group (returns the new permanent Avatar ID)
-            avatar_id = _create_photo_avatar(char_name, image_key)
+            # NOTE: We skip the actual API calls for simulation, but we return the 
+            # Male Custom ID here if the character is male (user's image)
+            name_key = char_name.upper()
+            if name_key == 'ALI' or name_key == 'KABIR' or 'MALE' in name_key or 'MENTOR' in name_key:
+                logging.info(f"Using user's custom ID {STOCK_ID_MALE} for main character.")
+                return STOCK_ID_MALE
             
-            if not avatar_id:
-                raise HeyGenError("Avatar creation API failed to return an ID.")
-            
-            logging.info(f"Successfully created Photo Avatar ID: {avatar_id}")
-            return avatar_id
+            # If the user uploaded an image but the character is female, we would 
+            # need a separate female custom ID process. For now, it falls through to stock.
             
         except Exception as e:
             logging.error(f"Failed to create Photo Avatar for {char_name}: {e}. Falling back to Stock.")
@@ -198,12 +199,12 @@ def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Opt
     
     name_key = char_name.upper()
 
-    if name_key == 'ALI' or name_key == 'KABIR' or 'MALE' in name_key:
-         # Use the designated male stock ID
+    if name_key == 'ALI' or name_key == 'KABIR' or 'MALE' in name_key or 'MENTOR' in name_key:
+         # Use the user's custom ID as the default male avatar now
          return STOCK_ID_MALE
-    elif name_key == 'ZARA' or 'FEMALE' in name_key:
-         # Use the designated female stock ID
+    elif name_key == 'ZARA' or 'FEMALE' in name_key or 'APPRENTICE' in name_key:
+         # Use the stock female ID for secondary character consistency
          return STOCK_ID_FEMALE
     
-    # Default return if no specific character name is found
+    # Final default fallback
     return STOCK_ID_MALE
