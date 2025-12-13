@@ -16,6 +16,12 @@ MAX_WAIT_TIME = 600      # seconds (10 minutes)
 
 logging.basicConfig(level=logging.INFO)
 
+# Global cache to store IDs so we don't ask the API every single time
+CACHED_AVATARS = {
+    "male": None,
+    "female": None
+}
+
 class HeyGenError(Exception):
     pass
 
@@ -54,6 +60,49 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
 
     except Exception as e:
         raise HeyGenError(f"HeyGen Error: {str(e)}")
+
+# -------------------------------------------------
+# DYNAMIC ID FETCHER (THE BYPASS)
+# -------------------------------------------------
+
+def _fetch_dynamic_avatar_id(gender_target: str) -> str:
+    """
+    Asks HeyGen for a list of avatars available to THIS account
+    and returns the first one that matches the gender.
+    """
+    global CACHED_AVATARS
+    
+    # Return cached if available
+    if CACHED_AVATARS.get(gender_target):
+        return CACHED_AVATARS[gender_target]
+
+    logging.info(f"🔍 Auto-discovering a valid {gender_target} avatar from HeyGen API...")
+    
+    try:
+        data = _request("GET", "/v2/avatars")
+        avatars = data.get("data", {}).get("avatars", [])
+        
+        for avatar in avatars:
+            # Check if gender matches (or take any if gender is None)
+            av_gender = avatar.get("gender", "male").lower()
+            av_id = avatar.get("avatar_id")
+            
+            if av_id and (gender_target == "any" or av_gender == gender_target):
+                logging.info(f"✅ Found Valid Avatar: {avatar.get('avatar_name')} (ID: {av_id})")
+                CACHED_AVATARS[gender_target] = av_id
+                return av_id
+                
+        # If no specific gender found, just return the very first avatar ID
+        if avatars:
+            fallback = avatars[0].get("avatar_id")
+            logging.warning(f"⚠️ No {gender_target} found. Using fallback: {fallback}")
+            return fallback
+            
+    except Exception as e:
+        logging.error(f"Failed to auto-discover avatars: {e}")
+        
+    # Ultimate hardcoded fallback if API list fails
+    return "Avatar_Expressive_20240520_01"
 
 # -------------------------------------------------
 # JOB POLLING
@@ -95,23 +144,18 @@ def generate_heygen_video(
     else:
         dimension = {"width": 1280, "height": 720}
 
-    # --- CRITICAL FIX: FORCE TALKING PHOTO MODE FOR YOUR ID ---
-    # This logic forces the API to treat ID 4343... as a 'talking_photo'.
-    # This is the only way to avoid the 404 if the ID is valid but the type is wrong.
-    
-    if "4343" in avatar_id:
-        logging.info(f"Forcing TALKING PHOTO mode for ID: {avatar_id}")
-        character = {
-            "type": "talking_photo",
-            "talking_photo_id": avatar_id
-        }
-    else:
-        logging.info(f"Using STANDARD AVATAR mode for ID: {avatar_id}")
-        character = {
-            "type": "avatar",
-            "avatar_id": avatar_id,
-            "avatar_style": "normal"
-        }
+    # Detect if we need to use the auto-discovered ID
+    # If the incoming ID is the broken one, fetch a new one dynamically
+    real_id = avatar_id
+    if "4343" in str(avatar_id) or "Avatar_Expressive" in str(avatar_id):
+        # We assume male context if the broken ID was passed
+        real_id = _fetch_dynamic_avatar_id("male")
+
+    character = {
+        "type": "avatar",
+        "avatar_id": real_id,
+        "avatar_style": "normal"
+    }
 
     payload = {
         "video_inputs": [{
@@ -122,11 +166,16 @@ def generate_heygen_video(
         "dimension": dimension
     }
 
-    logging.info(f"Submitting HeyGen Job for Avatar: {avatar_id}")
+    logging.info(f"Submitting HeyGen Job using Avatar ID: {real_id}")
     response = _request("POST", "/v2/video/generate", payload)
     
     video_id = response.get("data", {}).get("video_id")
-    if not video_id: raise HeyGenError("No video_id returned")
+    if not video_id:
+        # Fallback for V2 sometimes returning 'video_id' at root or 'job_id'
+        video_id = response.get("video_id") or response.get("job_id")
+
+    if not video_id: 
+        raise HeyGenError("No video_id returned")
 
     return _wait_for_job(video_id)
 
@@ -135,11 +184,7 @@ def generate_heygen_video(
 # -------------------------------------------------
 
 def get_stock_avatar(avatar_type: str = "male") -> str:
-    AVATARS = {
-        # Your Personal Male ID
-        "male": "4343bfb447bf4028a48b598ae297f5dc",
-        # Public Female ID (Tyler/Avatar Expressive)
-        "female": "Avatar_Expressive_20240520_02"
-    }
-    # Return Male ID by default
-    return AVATARS.get(avatar_type.lower(), "4343bfb447bf4028a48b598ae297f5dc")
+    """
+    Uses the API to find a valid avatar ID automatically.
+    """
+    return _fetch_dynamic_avatar_id(avatar_type)
