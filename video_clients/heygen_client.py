@@ -37,7 +37,6 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
     }
 
     try:
-        # Increased timeout to prevent network flakes
         response = requests.request(
             method=method,
             url=f"{HEYGEN_BASE_URL}{endpoint}",
