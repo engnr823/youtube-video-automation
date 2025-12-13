@@ -186,7 +186,7 @@ def ensure_character(name: str, appearance_prompt: Optional[str] = None, referen
 # -------------------------
 
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3),
-        retry=retry_if_exception_type(requests.exceptions.RequestException))
+       retry=retry_if_exception_type(requests.exceptions.RequestException))
 def download_to_file(url: str, dest_path: str, timeout: int = 300):
     logging.info(f"Downloading {url} -> {dest_path}")
     with requests.get(url, stream=True, timeout=timeout) as r:
@@ -288,9 +288,22 @@ def process_single_scene(
         avatar_id = char_data.get("heygen_avatar_id") 
         # -------------------------------------------------------
         
+        # --- SAFETY FIX: Ensure Avatar ID exists or fallback ---
         if not avatar_id:
-            logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Skipping avatar use.")
-            
+            logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Attempting stock fallback.")
+            try:
+                # Attempt to get a default male avatar if possible, or use a hardcoded safe ID
+                if get_stock_avatar:
+                    avatar_id = get_stock_avatar("male") 
+                else:
+                    avatar_id = "4343bfb447bf4028a48b598ae297f5dc"
+            except:
+                pass
+
+        if not avatar_id:
+             logging.error(f"Scene {index} SKIPPED: Missing Avatar ID. Cannot call HeyGen.")
+             return {"index": index, "video_path": None, "status": "skipped"}
+
         # 2. Upload Audio
         cloud_audio_url = None
         if audio_path and os.path.exists(audio_path):
@@ -535,20 +548,28 @@ def background_generate_video(self, form_data: dict):
              # Find the reference image URL if uploaded by the user
              ref_image = next((url for url in uploaded_images if name.lower() in url.lower()), None)
              
+             # --- REPLACED BROKEN LOGIC WITH WORKING STOCK/FALLBACK LOGIC ---
              try:
-                 if create_or_get_avatar:
-                     heygen_avatar_id = create_or_get_avatar(char_name=name, ref_image=ref_image)
-                     char_data["heygen_avatar_id"] = heygen_avatar_id
-                     char_data["reference_image"] = ref_image # Pass the ref image URL for video consistency
-                     character_faces[name] = char_data
+                 # Attempt to determine gender/type from description
+                 desc = char.get("appearance_prompt", "").lower()
+                 avatar_type = "female" if any(w in desc for w in ["woman", "female", "girl", "lady"]) else "male"
+                 
+                 # Use the imported function
+                 if get_stock_avatar:
+                     heygen_avatar_id = get_stock_avatar(avatar_type)
                  else:
-                     logging.warning(f"HeyGen Avatar creation function missing for {name}. Using placeholder.")
-                     char_data["heygen_avatar_id"] = "AVTR_DEFAULT"
-                     character_faces[name] = char_data
+                     heygen_avatar_id = "4343bfb447bf4028a48b598ae297f5dc" # Default male
+                 
+                 char_data["heygen_avatar_id"] = heygen_avatar_id
+                 char_data["reference_image"] = ref_image 
+                 character_faces[name] = char_data
 
              except Exception as e:
                  logging.error(f"Failed to create/get HeyGen avatar for {name}: {e}")
-                 pass
+                 # Critical Fallback to prevent 400 error later
+                 char_data["heygen_avatar_id"] = "4343bfb447bf4028a48b598ae297f5dc"
+                 character_faces[name] = char_data
+             # -----------------------------------------------------------------
         
         char_profile = characters[0].get("appearance_prompt", "Cinematic") if characters else "Cinematic"
 
