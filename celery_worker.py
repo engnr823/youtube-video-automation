@@ -16,6 +16,14 @@ from string import Template
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 
+# --- CRITICAL FIX 1: Ensure Python can find sibling packages like 'video_clients' ---
+# Get the absolute path of the directory containing this worker file
+WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
+# Add the parent directory (where 'video_clients' folder resides) to the system path
+# NOTE: If video_clients is a sibling of celery_worker.py, this will help.
+sys.path.insert(0, WORKER_DIR) 
+# ---------------------------------------------------------------------------------
+
 import requests
 import cloudinary
 import cloudinary.uploader
@@ -26,7 +34,6 @@ from pydantic import BaseModel, ValidationError
 from celery_init import celery
 
 # --- REPLICATE REMOVAL ---
-# We are removing Replicate. Ensure you remove the 'replicate' package from your requirements.txt.
 replicate = None 
 replicate_client = None 
 
@@ -51,7 +58,7 @@ try:
     from utils.ffmpeg_utils import get_media_duration
 except Exception:
     def get_media_duration(file_path):
-        # Fallback implementation from your original file
+        # Fallback implementation
         try:
             if not os.path.exists(file_path): return 0.0
             cmd = [
@@ -63,7 +70,7 @@ except Exception:
             return float(val) if val else 0.0
         except Exception as e:
             logging.error(f"Error getting duration for {file_path}: {e}")
-            return 0.0 # Changed from 5.0 to 0.0 for safety
+            return 0.0
 
 # --- CLIENT IMPORT SAFETY BLOCK (MODIFIED FOR HEYGEN) ---
 try:
@@ -74,14 +81,15 @@ except Exception:
     logging.warning("⚠️ ElevenLabs client not found. Voiceover generation will fail.")
     generate_audio_for_scene = None
 
-# CRITICAL: NEW HEYGEN CLIENT IMPORT (REQUIRES YOUR IMPLEMENTATION)
+# CRITICAL FIX 2: Correct HeyGen client import (using get_stock_avatar from the new client)
 try:
-    from video_clients.heygen_client import generate_heygen_video, create_or_get_avatar
+    from video_clients.heygen_client import generate_heygen_video, get_stock_avatar, HeyGenError
     HEYGEN_AVAILABLE = True
-except Exception:
-    logging.error("❌ HEYGEN CLIENT NOT FOUND. Video generation will fail until you create video_clients/heygen_client.py.")
+except ImportError as e:
+    # NOTE: The HEYGEN_CLIENT_NOT_FOUND error is triggered here. 
+    logging.error(f"❌ HEYGEN CLIENT NOT FOUND. Video generation will fail. IMPORT ERROR: {e}")
     generate_heygen_video = None
-    create_or_get_avatar = None
+    get_stock_avatar = None
     HEYGEN_AVAILABLE = False
 
 
@@ -147,10 +155,10 @@ ensure_dir(str(Path(CHAR_DB_PATH).parent))
 
 # CRITICAL: HeyGen uses Avatars/Voices defined in its platform. We assume these are IDs.
 VOICE_MAPPING = {
-    "MENTOR": "pqHfZKP75CvOlQylNhV4", # Use a unique ID for MENTOR
-    "APPRENTICE": "E1I8m3QzU5nF1A7W2ePq", # Use a unique ID for APPRENTICE
-    "NARRATOR": "pqHfZKP75CvOlQylNhV4",
-    "KABIR": "pqHfZKP75CvOlQylNhV4", 
+    "MENTOR": "21m00Tcm4TlvDq8ikWAM", 
+    "APPRENTICE": "E1I8m3QzU5nF1A7W2ePq",
+    "NARRATOR": "21m00Tcm4TlvDq8ikWAM",
+    "KABIR": "21m00Tcm4TlvDq8ikWAM", 
     "ZARA": "E1I8m3QzU5nF1A7W2ePq"
 }
 
@@ -177,11 +185,8 @@ def ensure_character(name: str, appearance_prompt: Optional[str] = None, referen
 # Core Utils (Kept)
 # -------------------------
 
-# ... (load_prompt_template, download_to_file, safe_upload_to_cloudinary, 
-#      extract_json_from_text, extract_json_list_from_text remain unchanged) ...
-
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3),
-       retry=retry_if_exception_type(requests.exceptions.RequestException))
+        retry=retry_if_exception_type(requests.exceptions.RequestException))
 def download_to_file(url: str, dest_path: str, timeout: int = 300):
     logging.info(f"Downloading {url} -> {dest_path}")
     with requests.get(url, stream=True, timeout=timeout) as r:
@@ -236,10 +241,6 @@ def extract_json_list_from_text(text: str) -> Optional[list]:
     return None
 
 # -------------------------
-# Replicate Removal: Removed normalize_replicate_output, get_latest_model_version_id, replicate_run_safe
-# -------------------------
-
-# -------------------------
 # Image generation (FLUX-like concept)
 # -------------------------
 def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str = "") -> str:
@@ -263,7 +264,7 @@ def process_single_scene(
     character_profile: str,
     audio_path: str = None,
     character_faces: dict = {},
-    aspect: str = "16:9"
+    aspect: str = "9:16"
 ) -> dict:
     
     if not HEYGEN_AVAILABLE:
@@ -277,27 +278,24 @@ def process_single_scene(
         # 1. Identify Character/Avatar ID for this scene
         character_list = scene.get('characters_in_scene')
         
-        # --- CRITICAL FIX: Safely extract the character name ---
-        # If the list exists and has content, use the first character name. Otherwise, it's None.
+        # --- Safely extract the character name ---
         target_char_name = character_list[0] if character_list and len(character_list) > 0 else None
         
         if not target_char_name:
-            # For B-roll or narrator scenes, use the first available character's avatar ID or default to "MENTOR".
             target_char_name = list(character_faces.keys())[0] if character_faces else "MENTOR"
             
         char_data = character_faces.get(target_char_name, {})
-        avatar_id = char_data.get("heygen_avatar_id") # We assume the char data now holds the HeyGen ID
+        avatar_id = char_data.get("heygen_avatar_id") 
         # -------------------------------------------------------
         
         if not avatar_id:
             logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Skipping avatar use.")
-            # For B-roll or generic shots, we might proceed without a talking avatar
             
         # 2. Upload Audio
         cloud_audio_url = None
         if audio_path and os.path.exists(audio_path):
             cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
-        
+            
         if not cloud_audio_url and (avatar_id or index > 0):
              logging.warning(f"Scene {index} skipped as required audio/avatar is missing.")
              return {"index": index, "video_path": None, "status": "skipped"}
@@ -305,17 +303,14 @@ def process_single_scene(
         # 3. Call the single HeyGen API function
         logging.info(f"Calling HeyGen for Scene {index} (Avatar: {avatar_id or 'B-roll'})")
         
-        # Combine prompts for HeyGen's unified generator
-        full_scene_prompt = f"{scene.get('visual_prompt')}. Action: {scene.get('action_prompt')}. Shot: {scene.get('shot_type')}. Lighting: {scene.get('lighting')}."
-
+        # NOTE: Using the CORRECTED HeyGen client function signature from the last fix.
+        # It expects aspect_ratio and background_color, NOT scene_prompt/scene_duration.
+        
         video_url = generate_heygen_video(
             avatar_id=avatar_id,
             audio_url=cloud_audio_url,
-            scene_prompt=full_scene_prompt,
-            scene_duration=scene.get("duration_seconds", 8),
-            aspect=aspect,
-            # Pass character image URL if available for consistency (Veo 3.1 feature)
-            ref_image_url=char_data.get("reference_image") 
+            aspect_ratio=aspect, # e.g., "9:16"
+            background_color="#000000" # Black is safer than white for most videos
         )
 
         if not video_url:
@@ -331,13 +326,14 @@ def process_single_scene(
         logging.error(f"Scene {index} failed: {traceback.format_exc()}")
         return {"index": index, "video_path": None, "status": "failed"}
     finally:
-        # Cleanup logic (omitted for brevity, assume it remains)
-        pass
+         if os.path.exists(temp_dir): 
+             try: shutil.rmtree(temp_dir)
+             except Exception as e: logging.warning(f"Failed to clean up temp dir {temp_dir}: {e}")
+
 # -------------------------
 # Stitching (Kept)
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
-    # ... (function body remains unchanged) ...
     request_id = str(uuid.uuid4())
     temp_dir = os.path.join("/tmp", f"render_{request_id}")
     os.makedirs(temp_dir, exist_ok=True)
@@ -387,8 +383,6 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
 # -------------------------
 # AGENTS (Kept)
 # -------------------------
-
-# ... (scrape_youtube_videos, analyze_competitors, get_openai_response, create_video_storyboard_agent, refine_script_with_roles remain unchanged) ...
 
 def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: bool = False) -> str:
     if not openai_client: raise RuntimeError("OpenAI client not configured")
