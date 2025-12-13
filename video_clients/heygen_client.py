@@ -11,11 +11,14 @@ from typing import Optional, Dict, Any
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
 HEYGEN_BASE_URL = "https://api.heygen.com"
 
-# INCREASED INTERVAL to avoid hitting status API before it's ready
-POLL_INTERVAL = 10       
-MAX_WAIT_TIME = 600      # 10 minutes
+POLL_INTERVAL = 5        # seconds
+MAX_WAIT_TIME = 600      # seconds (10 minutes)
 
 logging.basicConfig(level=logging.INFO)
+
+# -------------------------------------------------
+# EXCEPTIONS
+# -------------------------------------------------
 
 class HeyGenError(Exception):
     pass
@@ -26,7 +29,7 @@ class HeyGenError(Exception):
 
 def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict[str, Any]:
     if not HEYGEN_API_KEY:
-        raise HeyGenError("HEYGEN_API_KEY is missing")
+        raise HeyGenError("HEYGEN_API_KEY is missing from environment variables")
 
     headers = {
         "X-Api-Key": HEYGEN_API_KEY,
@@ -39,69 +42,65 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
             url=f"{HEYGEN_BASE_URL}{endpoint}",
             headers=headers,
             json=payload,
-            timeout=60
+            timeout=40
         )
         
-        # --- CRITICAL FIX FOR STATUS 404 ---
-        # If checking status and get 404, return None so we can retry
-        if response.status_code == 404 and "status" in endpoint:
-            logging.warning(f"Status endpoint returned 404 for {endpoint}. Video might still be initializing.")
-            return None
-
+        # Log detail before raising for status
         if response.status_code >= 400:
             try:
                 err_data = response.json()
-                msg = err_data.get("error", {}).get("message") or err_data.get("message")
-                logging.error(f"HeyGen API Error: {msg}")
+                detail = err_data.get("error", {}).get("message") or err_data.get("message")
+                logging.error(f"HeyGen API Error Detail: {detail}")
             except:
                 logging.error(f"HeyGen Raw Error: {response.text}")
         
         response.raise_for_status()
         return response.json()
 
+    except requests.exceptions.HTTPError as e:
+        try:
+            data = e.response.json()
+            message = data.get("error", {}).get("message") or data.get("message") or str(data)
+        except:
+            message = e.response.text[:200]
+        raise HeyGenError(f"HeyGen API ERROR [{e.response.status_code}]: {message}")
+
     except Exception as e:
-        # Re-raise unless it's handled above
-        if "404" in str(e) and "status" in endpoint:
-            return None
-        raise HeyGenError(f"HeyGen Error: {str(e)}")
+        raise HeyGenError(f"HeyGen Network/Request Error: {str(e)}")
+
 
 # -------------------------------------------------
-# JOB POLLING (With 404 Retry Logic)
+# JOB POLLING
 # -------------------------------------------------
 
 def _wait_for_job(video_id: str) -> str:
-    logging.info(f"HeyGen Polling for Video ID: {video_id}")
-    
-    # Wait initially to give HeyGen time to register the ID
-    time.sleep(10)
-    
+    """
+    Polls the status of a video generated via V2 API.
+    """
+    logging.info(f"HeyGen Polling started for Video ID: {video_id}")
     start = time.time()
-    
+
     while time.time() - start < MAX_WAIT_TIME:
         data = _request("GET", f"/v2/video/status?video_id={video_id}")
-        
-        # If None (404), it means "not ready yet", so just wait
-        if data is None:
-            logging.info(f"Video {video_id} not found yet... waiting.")
-            time.sleep(POLL_INTERVAL)
-            continue
+        inner_data = data.get("data", {})
+        status = inner_data.get("status")
 
-        inner = data.get("data", {})
-        status = inner.get("status")
-
-        logging.info(f"Video Status: {status}")
+        logging.info(f"HeyGen Video {video_id} status: {status}")
 
         if status == "completed":
-            video_url = inner.get("video_url")
-            if video_url:
-                return video_url
-        
+            video_url = inner_data.get("video_url")
+            if not video_url:
+                raise HeyGenError("Job completed but video_url is missing from response")
+            return video_url
+
         if status == "failed":
-            raise HeyGenError(f"Job failed: {inner.get('error')}")
+            error_info = inner_data.get("error") or "Unknown failure"
+            raise HeyGenError(f"HeyGen job failed: {error_info}")
 
         time.sleep(POLL_INTERVAL)
 
-    raise HeyGenError("Timeout waiting for video")
+    raise HeyGenError("HeyGen job timed out after 10 minutes")
+
 
 # -------------------------------------------------
 # MAIN VIDEO GENERATION
@@ -113,59 +112,68 @@ def generate_heygen_video(
     aspect_ratio: str = "9:16",
     background_color: str = "#000000"
 ) -> str:
-    
+    """
+    Generate HeyGen video using V2 API.
+    """
+
     if aspect_ratio == "9:16":
         dimension = {"width": 1080, "height": 1920}
     else:
         dimension = {"width": 1280, "height": 720}
 
-    # FORCE TALKING PHOTO MODE FOR YOUR ID
-    if "4343" in str(avatar_id):
-        character = {
-            "type": "talking_photo",
-            "talking_photo_id": "4343bfb447bf4028a48b598ae297f5dc"
-        }
-        logging.info("Using TALKING PHOTO mode for user ID.")
-    else:
-        character = {
-            "type": "avatar",
-            "avatar_id": avatar_id,
-            "avatar_style": "normal"
-        }
-        logging.info(f"Using STANDARD AVATAR mode for ID: {avatar_id}")
+    # --- CHANGED: FORCE STANDARD AVATAR MODE ---
+    # We are now treating your personal ID as a standard "avatar".
+    # If this fails again, the ID itself is likely invalid or deleted.
+    character_config = {
+        "type": "avatar",
+        "avatar_id": avatar_id,
+        "avatar_style": "normal"
+    }
+    logging.info(f"Using STANDARD AVATAR mode for ID: {avatar_id}")
 
     payload = {
-        "video_inputs": [{
-            "character": character,
-            "voice": {"type": "audio", "audio_url": audio_url},
-            "background": {"type": "color", "value": background_color}
-        }],
+        "video_inputs": [
+            {
+                "character": character_config,
+                "voice": {
+                    "type": "audio",
+                    "audio_url": audio_url
+                },
+                "background": {
+                    "type": "color",
+                    "value": background_color
+                }
+            }
+        ],
         "dimension": dimension
     }
 
-    logging.info(f"Submitting HeyGen Job...")
     response = _request("POST", "/v2/video/generate", payload)
-    
-    # Handle response variants
+
     video_id = response.get("data", {}).get("video_id")
     if not video_id:
         video_id = response.get("video_id") or response.get("job_id")
 
-    if not video_id: 
-        logging.error(f"Full Response: {response}")
-        raise HeyGenError("No video_id returned")
+    if not video_id:
+        logging.error(f"Invalid HeyGen Response: {response}")
+        raise HeyGenError("HeyGen did not return a video_id")
 
     return _wait_for_job(video_id)
+
 
 # -------------------------------------------------
 # AVATAR HELPERS
 # -------------------------------------------------
 
 def get_stock_avatar(avatar_type: str = "male") -> str:
+    """
+    Returns the configured Avatar IDs.
+    """
     AVATARS = {
-        # Your Personal Male ID
-        "male": "4343bfb447bf4028a48b598ae297f5dc",
-        # Public Female ID (Tyler/Avatar Expressive)
-        "female": "Avatar_Expressive_20240520_02"
+        "male": "4343bfb447bf4028a48b598ae297f5dc",   # Your Personal ID
+        "female": "26f5fc9be1fc47eab0ef65df30d47a4e" # Public Female Avatar
     }
-    return AVATARS.get(avatar_type.lower(), "4343bfb447bf4028a48b598ae297f5dc")
+    
+    fallback = "4343bfb447bf4028a48b598ae297f5dc" 
+    avatar_id = AVATARS.get(avatar_type.lower(), fallback)
+    return avatar_id
