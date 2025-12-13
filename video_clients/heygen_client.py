@@ -10,11 +10,9 @@ from typing import Optional, Dict, Any, List
 
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
 HEYGEN_BASE_URL = "https://api.heygen.com"
-
-# Safe "Lite" Avatar that works on Free/Paid plans (Josh Lite)
 SAFE_AVATAR_ID = "josh_lite3_20230714" 
 
-# Increased polling settings
+# Increased polling interval to be safe
 POLL_INTERVAL = 10       
 MAX_WAIT_TIME = 600      # 10 minutes
 
@@ -29,9 +27,6 @@ class HeyGenError(Exception):
 # -------------------------------------------------
 
 def _request(method: str, endpoint: str, payload: Optional[Dict] = None, timeout: int = 120) -> Dict[str, Any]:
-    """
-    Sends HTTP requests with extended timeout and error handling.
-    """
     if not HEYGEN_API_KEY:
         raise HeyGenError("HEYGEN_API_KEY is missing")
 
@@ -198,7 +193,7 @@ def generate_heygen_video(
     return _wait_for_job(video_id)
 
 # -------------------------------------------------
-# HELPER
+# HELPER FOR WORKER
 # -------------------------------------------------
 def get_safe_fallback_id():
     return SAFE_AVATAR_ID
