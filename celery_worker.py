@@ -10,97 +10,38 @@ import tempfile
 import traceback
 import concurrent.futures
 import subprocess
-import random
-import time
 from string import Template
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Tuple
 from pathlib import Path
 
-# --- CRITICAL FIX 1: Ensure Python can find sibling packages like 'video_clients' ---
-# Get the absolute path of the directory containing this worker file
+# Fix import path
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
-# Add the parent directory (where 'video_clients' folder resides) to the system path
-# NOTE: If video_clients is a sibling of celery_worker.py, this will help.
 sys.path.insert(0, WORKER_DIR) 
-# ---------------------------------------------------------------------------------
 
 import requests
 import cloudinary
 import cloudinary.uploader
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from pydantic import BaseModel, ValidationError
-
-# Celery app import
 from celery_init import celery
-
-# --- REPLICATE REMOVAL ---
-replicate = None 
-replicate_client = None 
-
 from openai import OpenAI
 
-# --- Utility Fix: Define missing ensure_dir function ---
-def ensure_dir(path):
-    """Ensure that the given directory path exists."""
-    if not os.path.exists(path):
-        os.makedirs(path, exist_ok=True)
-# --------------------------------------------------------
+# --- Configuration & Imports ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s]: %(message)s")
 
-# --- VOICE SETTINGS SAFE IMPORT (Kept) ---
 try:
-    from elevenlabs import VoiceSettings
-except Exception:
-    VoiceSettings = None
-    logging.warning("⚠️ ElevenLabs VoiceSettings not found. Using default voice stability.")
-
-# --- UTILS IMPORT SAFETY BLOCK (Kept) ---
-try:
-    from utils.ffmpeg_utils import get_media_duration
-except Exception:
-    def get_media_duration(file_path):
-        # Fallback implementation
-        try:
-            if not os.path.exists(file_path): return 0.0
-            cmd = [
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1", file_path
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            val = result.stdout.strip()
-            return float(val) if val else 0.0
-        except Exception as e:
-            logging.error(f"Error getting duration for {file_path}: {e}")
-            return 0.0
-
-# --- CLIENT IMPORT SAFETY BLOCK (MODIFIED FOR HEYGEN) ---
-try:
-    from video_clients.elevenlabs_client import (
-        generate_audio_for_scene
-    )
-except Exception:
-    logging.warning("⚠️ ElevenLabs client not found. Voiceover generation will fail.")
+    from video_clients.elevenlabs_client import generate_audio_for_scene
+except:
     generate_audio_for_scene = None
 
-# CRITICAL FIX 2: Correct HeyGen client import (using get_stock_avatar from the new client)
 try:
-    from video_clients.heygen_client import generate_heygen_video, get_stock_avatar, HeyGenError
+    from video_clients.heygen_client import generate_heygen_video, get_stock_avatar
     HEYGEN_AVAILABLE = True
-except ImportError as e:
-    # NOTE: The HEYGEN_CLIENT_NOT_FOUND error is triggered here. 
-    logging.error(f"❌ HEYGEN CLIENT NOT FOUND. Video generation will fail. IMPORT ERROR: {e}")
-    generate_heygen_video = None
-    get_stock_avatar = None
+except ImportError:
     HEYGEN_AVAILABLE = False
 
-
-# -------------------------
-# Configuration
-# -------------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] (WORKER): %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
-logging.getLogger("httpx").setLevel(logging.WARNING)
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SCRAPINGBEE_API_KEY = os.getenv("SCRAPINGBEE_API_KEY")
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.getenv("CLOUDINARY_API_SECRET")]):
     cloudinary.config(
@@ -109,578 +50,216 @@ if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.
         api_secret=os.environ.get("CLOUDINARY_API_SECRET"),
         secure=True
     )
-else:
-    logging.warning("⚠️ Cloudinary not fully configured; uploads will fail.")
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-
-# -------------------------
-# Royalty-Free Music Library (Filtered for Cinematic/Motivation)
-# -------------------------
-MUSIC_LIBRARY = {
-    "motivational": "https://cdn.pixabay.com/audio/2022/07/22/powerful-8526.mp3",
-    "intense": "https://cdn.pixabay.com/audio/2023/12/06/trailer-mood-176840.mp3",
-    "sad": "https://cdn.pixabay.com/audio/2022/09/20/emotional-128225.mp3",
-    "ambient": "https://cdn.pixabay.com/audio/2022/07/26/cinematic-ambient-11634.mp3",
-    "default": "https://cdn.pixabay.com/audio/2022/07/22/powerful-8526.mp3"
-}
-
-# -------------------------
-# Pydantic Schemas (Kept)
-# -------------------------
-class SceneSchema(BaseModel):
-    scene_id: int
-    duration_seconds: float
-    visual_prompt: str
-    action_prompt: str
-    audio_narration: Optional[str] = ""
-    shot_type: Optional[str] = "medium"
-    camera_angle: Optional[str] = "35mm"
-    lighting: Optional[str] = "soft cinematic"
-    emotion: Optional[str] = "neutral"
-    characters_in_scene: Optional[List[str]] = []
-    image_url: Optional[str] = None
-    video_url: Optional[str] = None
-
-class StoryboardSchema(BaseModel):
-    video_title: str
-    video_description: Optional[str] = ""
-    main_character_profile: Optional[str] = ""
-    characters: Optional[List[dict]] = []
-    scenes: List[SceneSchema]
-
-# --- CHARACTER DATABASE & VOICE MAPPING (Optimized for HeyGen roles) ---
-CHAR_DB_PATH = os.getenv("CHAR_DB_PATH", "/var/data/character_db.json")
-ensure_dir(str(Path(CHAR_DB_PATH).parent))
-
-# CRITICAL: HeyGen uses Avatars/Voices defined in its platform. We assume these are IDs.
-VOICE_MAPPING = {
-    "MENTOR": "21m00Tcm4TlvDq8ikWAM", 
-    "APPRENTICE": "E1I8m3QzU5nF1A7W2ePq",
-    "NARRATOR": "21m00Tcm4TlvDq8ikWAM",
-    "KABIR": "21m00Tcm4TlvDq8ikWAM", 
-    "ZARA": "E1I8m3QzU5nF1A7W2ePq"
-}
-
-def ensure_character(name: str, appearance_prompt: Optional[str] = None, reference_image_url: Optional[str] = None, voice_id: Optional[str] = None) -> dict:
+# --- Utils ---
+def get_media_duration(file_path):
     try:
-        with open(CHAR_DB_PATH, "r") as f: db = json.load(f)
-    except Exception:
-        db = {}
-    if name in db: return db[name]
-    db[name] = {
-        "id": str(uuid.uuid4()),
-        "name": name,
-        "appearance_prompt": appearance_prompt or f"{name}, photorealistic",
-        "reference_image": reference_image_url,
-        "voice_id": voice_id
-    }
-    try:
-        with open(CHAR_DB_PATH, "w") as f: json.dump(db, f, indent=2)
-    except Exception as e:
-        logging.warning(f"Could not write char DB: {e}")
-    return db[name]
+        if not os.path.exists(file_path): return 0.0
+        cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return float(result.stdout.strip()) if result.stdout.strip() else 0.0
+    except: return 0.0
 
-# -------------------------
-# Core Utils (Kept)
-# -------------------------
-
-@retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3),
-       retry=retry_if_exception_type(requests.exceptions.RequestException))
-def download_to_file(url: str, dest_path: str, timeout: int = 300):
-    logging.info(f"Downloading {url} -> {dest_path}")
-    with requests.get(url, stream=True, timeout=timeout) as r:
+def download_to_file(url, dest_path):
+    with requests.get(url, stream=True) as r:
         r.raise_for_status()
         with open(dest_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
+            for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
     return dest_path
 
-def safe_upload_to_cloudinary(filepath: str, resource_type="video", folder="automations"):
-    try:
-        res = cloudinary.uploader.upload(filepath, resource_type=resource_type, folder=folder)
-        url = res.get("secure_url") or res.get("url")
-        logging.info(f"Uploaded to Cloudinary: {url}")
-        return url
-    except Exception as e:
-        logging.error(f"Cloudinary upload failed: {e}")
-        raise
+def safe_upload_to_cloudinary(filepath, resource_type="video", folder="automations"):
+    res = cloudinary.uploader.upload(filepath, resource_type=resource_type, folder=folder)
+    return res.get("secure_url")
 
-def load_prompt_template(filename: str) -> str:
+def load_prompt_template(filename):
     path = os.path.join("prompts", filename)
-    if not os.path.exists(path):
-        return ""
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+    return open(path, "r", encoding="utf-8").read() if os.path.exists(path) else ""
 
-def extract_json_from_text(text: str) -> Optional[dict]:
-    if not text: return None
-    m = re.search(r'```(?:json)?\s*(\{.*\})\s*```', text, re.DOTALL)
-    if m:
-        try: return json.loads(m.group(1))
-        except: pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try: return json.loads(text[start:end+1])
-        except: pass
-    return None
-
-def extract_json_list_from_text(text: str) -> Optional[list]:
-    if not text: return None
-    m = re.search(r'```(?:json)?\s*(\[.*\])\s*```', text, re.DOTALL)
-    if m:
-        try: return json.loads(m.group(1))
-        except: pass
-    start = text.find("[")
-    end = text.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        try: return json.loads(text[start:end+1])
-        except: pass
-    return None
-
-# -------------------------
-# Image generation (FLUX-like concept)
-# -------------------------
-def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str = "") -> str:
-    """
-    CONCEPTUAL: Replace with a stable image generation source (e.g., DALL-E, Stable Diffusion API).
-    Used primarily for initial character casting and thumbnail generation.
-    """
-    logging.warning("⚠️ Using conceptual image generation. Replace this with a working image API call.")
-    # Fallback to a placeholder URL in the absence of a working API to allow the pipeline to proceed
-    if 'old man' in prompt.lower() or 'mentor' in prompt.lower():
-        return "https://placeimg.com/480/832/people" # Placeholder for Mentor
-    return "https://placeimg.com/480/832/abstract"
-
-
-# -------------------------
-# Single scene processor (REWRITTEN FOR HEYGEN CONCEPT)
-# -------------------------
-def process_single_scene(
-    scene: dict,
-    index: int,
-    character_profile: str,
-    audio_path: str = None,
-    character_faces: dict = {},
-    aspect: str = "9:16"
-) -> dict:
+# --- Scene Processing ---
+def process_single_scene(scene, index, character_profile, audio_path, character_faces, aspect):
+    if not HEYGEN_AVAILABLE: return {"index": index, "status": "failed"}
     
-    if not HEYGEN_AVAILABLE:
-        raise RuntimeError("HeyGen client not available. Cannot generate video scene.")
-
     request_id = str(uuid.uuid4())[:8]
     temp_dir = os.path.join("/tmp", f"scene_{index}_{request_id}")
     os.makedirs(temp_dir, exist_ok=True)
-    
+
     try:
-        # 1. Identify Character/Avatar ID for this scene
-        character_list = scene.get('characters_in_scene')
+        # Determine Character
+        char_list = scene.get('characters_in_scene', [])
+        char_name = char_list[0] if char_list else list(character_faces.keys())[0] if character_faces else "Unknown"
         
-        # --- Safely extract the character name ---
-        target_char_name = character_list[0] if character_list and len(character_list) > 0 else None
-        
-        if not target_char_name:
-            target_char_name = list(character_faces.keys())[0] if character_faces else "MENTOR"
+        char_data = character_faces.get(char_name, {})
+        # DEFAULT TO MALE ID if missing (Your ID)
+        avatar_id = char_data.get("heygen_avatar_id", "4343bfb447bf4028a48b598ae297f5dc")
+
+        # Upload Audio
+        if not audio_path or not os.path.exists(audio_path):
+            logging.warning(f"Scene {index}: No audio. Skipping.")
+            return {"index": index, "status": "skipped"}
             
-        char_data = character_faces.get(target_char_name, {})
-        avatar_id = char_data.get("heygen_avatar_id") 
-        # -------------------------------------------------------
-        
-        # --- SAFETY FIX: Ensure Avatar ID exists or fallback ---
-        if not avatar_id:
-            logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Attempting stock fallback.")
-            try:
-                # Attempt to get a default male avatar if possible, or use a hardcoded safe ID
-                if get_stock_avatar:
-                    avatar_id = get_stock_avatar("male") 
-                else:
-                    # UPDATED FALLBACK TO SAFE PUBLIC AVATAR
-                    avatar_id = "Avatar_Expressive_20240520_01"
-            except:
-                pass
+        cloud_audio = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
 
-        if not avatar_id:
-             logging.error(f"Scene {index} SKIPPED: Missing Avatar ID. Cannot call HeyGen.")
-             return {"index": index, "video_path": None, "status": "skipped"}
-
-        # 2. Upload Audio
-        cloud_audio_url = None
-        if audio_path and os.path.exists(audio_path):
-            cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
-            
-        if not cloud_audio_url and (avatar_id or index > 0):
-             logging.warning(f"Scene {index} skipped as required audio/avatar is missing.")
-             return {"index": index, "video_path": None, "status": "skipped"}
-
-        # 3. Call the single HeyGen API function
-        logging.info(f"Calling HeyGen for Scene {index} (Avatar: {avatar_id or 'B-roll'})")
-        
-        # NOTE: Using the CORRECTED HeyGen client function signature from the last fix.
-        # It expects aspect_ratio and background_color, NOT scene_prompt/scene_duration.
-        
+        # Generate Video
+        logging.info(f"Scene {index}: Generating with Avatar {avatar_id} ({char_name})")
         video_url = generate_heygen_video(
             avatar_id=avatar_id,
-            audio_url=cloud_audio_url,
-            aspect_ratio=aspect, # e.g., "9:16"
-            background_color="#000000" # Black is safer than white for most videos
+            audio_url=cloud_audio,
+            aspect_ratio=aspect
         )
 
-        if not video_url:
-            raise RuntimeError("Video generation failed via HeyGen")
-
-        # 4. Download and return
-        temp_video_path = os.path.join(temp_dir, f"scene_gen_{index}.mp4")
-        download_to_file(str(video_url), temp_video_path, timeout=300)
-
-        return {"index": index, "video_path": temp_video_path, "status": "success"}
+        # Download Result
+        dest = os.path.join(temp_dir, f"scene_{index}.mp4")
+        download_to_file(video_url, dest)
+        return {"index": index, "video_path": dest, "status": "success"}
 
     except Exception as e:
-        logging.error(f"Scene {index} failed: {traceback.format_exc()}")
-        return {"index": index, "video_path": None, "status": "failed"}
-    finally:
-         if os.path.exists(temp_dir): 
-             try: shutil.rmtree(temp_dir)
-             except Exception as e: logging.warning(f"Failed to clean up temp dir {temp_dir}: {e}")
+        logging.error(f"Scene {index} Failed: {e}")
+        return {"index": index, "status": "failed"}
 
-# -------------------------
-# Stitching (Kept)
-# -------------------------
-def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
-    request_id = str(uuid.uuid4())
-    temp_dir = os.path.join("/tmp", f"render_{request_id}")
+# --- Stitching ---
+def stitch_video(scene_pairs, output_path):
+    temp_dir = os.path.join("/tmp", f"stitch_{uuid.uuid4()}")
     os.makedirs(temp_dir, exist_ok=True)
-    input_list_path = os.path.join(temp_dir, "inputs.txt")
-    chunk_paths = []
+    list_path = os.path.join(temp_dir, "inputs.txt")
+    
     try:
-        logging.info(f"Processing {len(scene_pairs)} pairs")
+        chunks = []
         for i, (video, audio) in enumerate(scene_pairs):
-            chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
-            audio_dur = get_media_duration(audio)
-            if audio_dur == 0: continue
-            cmd = [
+            dur = get_media_duration(audio)
+            chunk = os.path.join(temp_dir, f"chunk_{i}.mp4")
+            subprocess.run([
                 "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
-                "-t", str(audio_dur),
-                "-map", "0:v", "-map", "1:a",
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-vf", "scale='min(720,iw)':-2",
-                "-preset", "ultrafast",
-                "-crf", "28",
-                "-c:a", "aac",
-                "-shortest",
-                chunk_name
-            ]
-            subprocess.run(cmd, check=True, capture_output=True)
-            chunk_paths.append(chunk_name)
-
-        if not chunk_paths: return False
-
-        with open(input_list_path, "w") as f:
-            for chunk in chunk_paths:
-                abs_path = os.path.abspath(chunk).replace("'", "'\\''")
-                f.write(f"file '{abs_path}'\n")
-
+                "-t", str(dur), "-c:v", "libx264", "-c:a", "aac", "-shortest", chunk
+            ], check=True, capture_output=True)
+            chunks.append(chunk)
+            
+        with open(list_path, "w") as f:
+            for c in chunks: f.write(f"file '{c}'\n")
+            
         subprocess.run([
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-            "-i", input_list_path, "-c", "copy", output_path
-        ], check=True, capture_output=True)
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", output_path
+        ], check=True)
         return True
     except Exception as e:
-        logging.error(f"Stitching error: {e}")
+        logging.error(f"Stitching failed: {e}")
         return False
     finally:
-        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
-
-# -------------------------
-# AGENTS (Kept)
-# -------------------------
-
-def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: bool = False) -> str:
-    if not openai_client: raise RuntimeError("OpenAI client not configured")
-    try:
-        system_content = "You are a professional screenwriter."
-        if is_json: system_content += " You must output valid JSON."
-        completion = openai_client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL","gpt-4o"),
-            messages=[{"role":"system","content": system_content},{"role":"user","content":prompt_content}],
-            temperature=temperature,
-            response_format={"type": "json_object"} if is_json else {"type": "text"}
-        )
-        return completion.choices[0].message.content or ""
-    except Exception as e:
-        logging.error(f"OpenAI error: {e}")
-        return ""
-
-def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict) -> dict:
-    prompt_template = load_prompt_template("prompt_video_storyboard_creator.txt")
-    if not prompt_template:
-        prompt_template = "TASK: Create script for '$keyword'. Output valid JSON."
-    template = Template(prompt_template)
-    full_context = keyword
-    if form_data.get("characters"): full_context += f"\n\nUSER DEFINED CHARACTERS:\n{form_data.get('characters')}"
-    target_scenes = form_data.get("max_scenes", 7)
-    prompt = template.safe_substitute(
-        keyword=full_context,
-        blueprint_json=json.dumps(blueprint),
+# --- AI Agents ---
+def create_storyboard(keyword, form_data):
+    template = load_prompt_template("prompt_video_storyboard_creator.txt") or "{}"
+    prompt = Template(template).safe_substitute(
+        keyword=keyword, 
+        blueprint_json="{}", 
         language=form_data.get("language", "english"),
-        video_type=form_data.get("video_type", "reel"),
-        uploaded_assets_context="User uploaded images present" if form_data.get("uploaded_images") else "No uploads",
-        max_scenes=str(target_scenes)
+        max_scenes=str(form_data.get("max_scenes", 5))
     )
-    # CRITICAL: Tell LLM the new long-form goal and required data
-    prompt += f"\n\nIMPORTANT: The 'audio_narration' across all scenes MUST total at least 150 words (60+ seconds total length). Generate exactly {target_scenes} scenes. For dialogue, explicitly start the narration with the character name followed by a colon (e.g., KABIR: Hello. ZARA: Hi.). ALSO, include a 'duration_seconds' of 6 to 10 seconds for EACH scene object."
-    raw = get_openai_response(prompt, temperature=0.6, is_json=True)
-    obj = extract_json_from_text(raw) or (json.loads(raw) if raw else {})
-    if not obj: raise RuntimeError("Storyboard generation failed")
-    try: return StoryboardSchema(**obj).dict()
-    except ValidationError: return {"video_title": "Untitled", "scenes": obj.get("scenes", []), "characters": obj.get("characters", [])}
-
-def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
-    characters = storyboard.get('characters', [])
-    full_script_text = " ".join([s.get('audio_narration', '') for s in storyboard.get('scenes', [])])
-    prompt = f"""
-    You are a Voice Director.
-    TASK: Convert this raw script into a STRICT JSON list of audio segments.
-    REAL CHARACTERS: {json.dumps(characters)}
-    RAW SCRIPT: "{full_script_text}"
-    OUTPUT FORMAT EXAMPLE:
-    [
-      {{"speaker": "Hero", "text": "Let's go."}},
-      {{"speaker": "Narrator", "text": "They left."}}
-    ]
-    """
-    try:
-        raw = get_openai_response(prompt, temperature=0.1, is_json=True)
-        segments = extract_json_list_from_text(raw) or []
-    except Exception: segments = []
-    if not isinstance(segments, list) or len(segments) == 0:
-        return [{"speaker": "Narrator", "text": full_script_text, "voice_id": form_data.get("voice_selection")}]
-    final_segments = []
-    main_voice_id = form_data.get("voice_selection") or "21m00Tcm4TlvDq8ikWAM"
-    for seg in segments:
-        speaker_name = seg.get("speaker", "Narrator")
-        text = seg.get("text", "")
-        if not text: continue
-        voice = main_voice_id 
-        char_obj = next((c for c in characters if c.get("name") in speaker_name or speaker_name in c.get("name")), None)
-        if char_obj and char_obj.get("voice_id"): voice = char_obj.get("voice_id")
-        final_segments.append({"text": text, "voice_id": voice})
-    return final_segments
-
-# Function to generate a thumbnail using the image model (UPDATED FOR HIGH QUALITY)
-def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Optional[str]:
-    summary = storyboard.get("video_description") or "Video"
-    video_title = storyboard.get("video_title") or "New Video"
     
-    # NEW CINEMATIC POSTER PROMPT
-    cinematic_prompt = (
-        f"Movie poster style for channel The Apex Archive, titled '{video_title}'. "
-        f"Epic cinematic shot: {summary}, deep shadows, volumetric lighting, "
-        f"bold typography placeholder, 8k, hyper-detailed, dramatic focus."
+    completion = openai_client.chat.completions.create(
+        model="gpt-4o", messages=[{"role":"user", "content": prompt}], response_format={"type": "json_object"}
     )
-    negative_prompt = "blurry, poor detail, cartoon, low contrast, text, signature, low resolution"
+    return json.loads(completion.choices[0].message.content)
+
+def refine_script(storyboard, form_data):
+    # Simplified for robustness
+    segments = []
+    default_voice = form_data.get("voice_selection", "21m00Tcm4TlvDq8ikWAM")
     
-    try: 
-        # Pass the enhanced cinematic prompt and negative prompt
-        return generate_flux_image(cinematic_prompt, aspect=orientation, negative_prompt=negative_prompt)
-    except: 
-        return None
+    for scene in storyboard.get("scenes", []):
+        text = scene.get("audio_narration", "")
+        # Basic voice assignment logic could go here if needed
+        segments.append({"text": text, "voice_id": default_voice})
+    return segments
 
-def youtube_metadata_agent(full_script: str, keyword: str, form_data: dict, blueprint: dict) -> dict:
-    prompt_template = load_prompt_template("prompt_youtube_metadata_generator.txt")
-    if not prompt_template: return {}
-    template = Template(prompt_template)
-    prompt = template.safe_substitute(
-        primary_keyword=keyword,
-        full_script=full_script[:3000],
-        language=form_data.get("language", "english"),
-        video_type=form_data.get("video_type", "reel"),
-        blueprint_data=json.dumps(blueprint),
-        thumbnail_concept=form_data.get("thumbnail_concept", "")
-    )
-    raw = get_openai_response(prompt, temperature=0.4, is_json=True)
-    return extract_json_from_text(raw) or (json.loads(raw) if raw else {})
-
-# -------------------------
-# Celery Task (MODIFIED)
-# -------------------------
+# --- Main Task ---
 @celery.task(bind=True)
-def background_generate_video(self, form_data: dict):
-    task_id = getattr(self.request, "id", "unknown")
-    logging.info(f"[{task_id}] SaaS Task started.")
-    if not HEYGEN_AVAILABLE:
-        logging.error("Task aborted: HeyGen client is not configured.")
-        raise RuntimeError("Video generation failed: HEYGEN_AVAILABLE is False.")
-
+def background_generate_video(self, form_data):
     try:
-        def update_status(msg):
-            self.update_state(state="PROGRESS", meta={"message": msg})
-            logging.info(msg)
+        # 1. Concept
+        self.update_state(state="PROGRESS", meta={"message": "Creating Storyboard..."})
+        storyboard = create_storyboard(form_data.get("keyword"), form_data)
         
-        keyword = form_data.get("keyword")
-        if not keyword: raise ValueError("Keyword required")
-        
-        # 1. Blueprint (Remains the same)
-        update_status("Designing Video Concept...")
-        # NOTE: scrape_youtube_videos and analyze_competitors were implied in original worker, but not provided. Assuming they exist or are mocked outside of this file.
-        # scraped = scrape_youtube_videos(keyword) 
-        # blueprint = analyze_competitors(scraped) 
-        scraped = {} # Mocked
-        blueprint = {} # Mocked
-        
-        storyboard = create_video_storyboard_agent(keyword, blueprint, form_data)
-        scenes = storyboard.get("scenes", [])
-        if not scenes: raise RuntimeError("Failed to generate scenes.")
-
-        # 2. Casting & Character Data Enrichment (FIXED FOR HEYGEN CONSISTENCY)
-        update_status("Casting Characters...")
-        characters = storyboard.get("characters") or []
-        uploaded_images = form_data.get("uploaded_images") or []
-        character_faces = {}
-        
-        # CRITICAL FIX: Use the new create_or_get_avatar for consistency
+        # 2. Casting (Fixing Gender Mismatch)
+        characters = storyboard.get("characters", [])
+        char_faces = {}
         for char in characters:
-             name = char.get("name", "Unknown")
-             char_data = ensure_character(name, appearance_prompt=char.get("appearance_prompt"))
-             
-             # Find the reference image URL if uploaded by the user
-             ref_image = next((url for url in uploaded_images if name.lower() in url.lower()), None)
-             
-             # --- REPLACED BROKEN LOGIC WITH WORKING STOCK/FALLBACK LOGIC ---
-             try:
-                 # Attempt to determine gender/type from description
-                 desc = char.get("appearance_prompt", "").lower()
-                 avatar_type = "female" if any(w in desc for w in ["woman", "female", "girl", "lady"]) else "male"
-                 
-                 # Use the imported function
-                 if get_stock_avatar:
-                     heygen_avatar_id = get_stock_avatar(avatar_type)
-                 else:
-                     # UPDATED FALLBACK TO SAFE PUBLIC AVATAR
-                     heygen_avatar_id = "Avatar_Expressive_20240520_01" 
-                 
-                 char_data["heygen_avatar_id"] = heygen_avatar_id
-                 char_data["reference_image"] = ref_image 
-                 character_faces[name] = char_data
+            name = char.get("name", "Unknown")
+            desc = char.get("appearance_prompt", "").lower()
+            name_lower = name.lower()
+            
+            # IMPROVED GENDER DETECTION
+            is_female = any(w in desc for w in ["woman", "female", "girl", "lady", "mother", "wife"]) or \
+                        any(w in name_lower for w in ["zara", "sarah", "emily", "mom", "aisha", "fatima"])
+            
+            # Select ID
+            if is_female:
+                # Use Public Female Avatar
+                avatar_id = "Avatar_Expressive_20240520_02"
+            else:
+                # Use Your Male Talking Photo
+                avatar_id = "4343bfb447bf4028a48b598ae297f5dc"
+            
+            char_faces[name] = {"heygen_avatar_id": avatar_id}
 
-             except Exception as e:
-                 logging.error(f"Failed to create/get HeyGen avatar for {name}: {e}")
-                 # Critical Fallback to prevent 400 error later
-                 # UPDATED FALLBACK TO SAFE PUBLIC AVATAR
-                 char_data["heygen_avatar_id"] = "Avatar_Expressive_20240520_01"
-                 character_faces[name] = char_data
-             # -----------------------------------------------------------------
-        
-        char_profile = characters[0].get("appearance_prompt", "Cinematic") if characters else "Cinematic"
-
-        # 3. Audio Synthesis (Remains the same)
-        update_status("Synthesizing Audio Dialogue...")
-        segments = refine_script_with_roles(storyboard, form_data)
+        # 3. Audio
+        self.update_state(state="PROGRESS", meta={"message": "Generating Audio..."})
+        segments = refine_script(storyboard, form_data)
         scene_assets = []
-        full_script_text = ""
-        for i, scene in enumerate(scenes):
-            # ... (audio generation and scene_assets creation logic remains) ...
-            text = segments[i].get("text") if i < len(segments) else "..."
-            voice_id = segments[i].get("voice_id") if i < len(segments) else "21m00Tcm4TlvDq8ikWAM"
-            if voice_id: voice_id = voice_id.strip(" []'\"")
-            full_script_text += text + " "
-            audio_path = None
-            if generate_audio_for_scene:
-                try: 
-                    # NOTE: generate_audio_for_scene returns a dict, extract path
-                    audio_res = generate_audio_for_scene(text, voice_id)
-                    audio_path = audio_res.get("path") if audio_res else None
-                except Exception as e:
-                    logging.error(f"Audio generation failed for scene {i}: {e}")
-                    audio_path = None
-            if audio_path:
-                duration = get_media_duration(audio_path)
+        
+        for i, scene in enumerate(storyboard.get("scenes", [])):
+            text = segments[i]["text"]
+            voice = segments[i]["voice_id"]
+            
+            # Generate Audio
+            audio_res = generate_audio_for_scene(text, voice) if generate_audio_for_scene else None
+            if audio_res:
                 scene_assets.append({
-                    "index": i, "audio_path": audio_path, "duration": duration, "scene_data": scene
+                    "index": i, 
+                    "audio_path": audio_res["path"], 
+                    "scene_data": scene
                 })
 
-        if not scene_assets: raise RuntimeError("Audio generation failed for all scenes.")
-
-        # 4. Rendering (Calls the NEW streamlined process_single_scene)
-        update_status("Rendering Video Scenes (Streamlined HeyGen Call)...")
+        # 4. Video Generation
+        self.update_state(state="PROGRESS", meta={"message": "Rendering Video (HeyGen)..."})
         aspect = "9:16" if form_data.get("video_type") == "reel" else "16:9"
         final_pairs = []
         
-        # Increased max_workers to 4-6 can improve throughput, but may cost more.
-        # Sticking to max_workers=2 is safer for low-credit accounts.
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_to_asset = {
-                executor.submit(process_single_scene, asset["scene_data"], asset["index"], char_profile, asset["audio_path"], character_faces, aspect): asset
+            futures = {
+                executor.submit(process_single_scene, 
+                                asset["scene_data"], 
+                                asset["index"], 
+                                "", 
+                                asset["audio_path"], 
+                                char_faces, 
+                                aspect): asset 
                 for asset in scene_assets
             }
-            results_map = {}
-            # ... (result collection and error handling remains) ...
-            for future in concurrent.futures.as_completed(future_to_asset):
-                asset = future_to_asset[future]
-                idx = asset["index"]
-                try: res = future.result()
-                except Exception as e:
-                    logging.error(f"Scene {idx} raised exception: {e}")
-                    res = {"index": idx, "video_path": None, "status": "failed"}
-                if res["status"] == "success" and res["video_path"]:
-                    results_map[idx] = (res["video_path"], asset["audio_path"])
-                else: logging.warning(f"Scene {idx} video failed. Skipping.")
-            for i in range(len(scenes)):
-                if i in results_map: final_pairs.append(results_map[i])
+            
+            results = {}
+            for f in concurrent.futures.as_completed(futures):
+                res = f.result()
+                if res["status"] == "success":
+                    # Map index to (video, audio)
+                    results[res["index"]] = (res["video_path"], futures[f]["audio_path"])
+            
+            # Sort by index
+            for i in range(len(storyboard["scenes"])):
+                if i in results: final_pairs.append(results[i])
 
+        if not final_pairs: raise RuntimeError("No scenes were generated successfully.")
 
-        if not final_pairs: raise RuntimeError("Video generation failed.")
+        # 5. Stitching
+        self.update_state(state="PROGRESS", meta={"message": "Stitching Final Video..."})
+        final_path = f"/tmp/final_{uuid.uuid4()}.mp4"
+        if stitch_video(final_pairs, final_path):
+            video_url = safe_upload_to_cloudinary(final_path, folder="final_videos")
+            return {"status": "ready", "video_url": video_url}
+        else:
+            raise RuntimeError("Stitching failed")
 
-        # 5. Stitching (Remains the same with Loudnorm fix)
-        update_status("Final Assembly (Audio-Video Sync)...")
-        music_tone = blueprint.get("tone", "motivational")
-        music_url = MUSIC_LIBRARY.get(music_tone, MUSIC_LIBRARY["default"])
-        music_path = os.path.join(tempfile.gettempdir(), f"music_{uuid.uuid4()}.mp3")
-        try: download_to_file(music_url, music_path)
-        except: music_path = None
-        final_output_path = f"/tmp/final_render_{task_id}.mp4"
-        temp_visual_path = f"/tmp/visual_base_{task_id}.mp4"
-        # Assuming you have a process_and_stitch_scenes or similar function available:
-        # success = process_and_stitch_scenes(final_pairs, temp_visual_path)
-        
-        # Using the existing stitch_video_audio_pairs_optimized function:
-        success = stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path)
-        if not success: raise RuntimeError("Stitching failed.")
-        
-        # Final audio mix
-        # Assuming you have mix_music_and_finalize function available in the scope or use the block below
-        if music_path:
-            # Loudnorm / Amix filter complex for balanced audio
-            cmd = [
-                "ffmpeg", "-y", "-i", temp_visual_path, "-stream_loop", "-1", "-i", music_path,
-                "-filter_complex", 
-                "[0:a]loudnorm=I=-14:LRA=7:tp=-2,volume=0.9[dia];[1:a]loudnorm=I=-22:LRA=7:tp=-2[bg];[dia][bg]amix=inputs=2:duration=first:weights=1 1[outa]",
-                "-map", "0:v", "-map", "[outa]",
-                "-c:v", "libx264", "-vf", "scale='min(720,iw)':-2", "-preset", "fast", "-crf", "23",
-                "-c:a", "aac", "-shortest", final_output_path
-            ]
-            subprocess.run(cmd, check=True)
-        else: shutil.move(temp_visual_path, final_output_path)
-        
-        # 6. Upload & Finalizing
-        update_status("Uploading & Finalizing...")
-        final_video_url = safe_upload_to_cloudinary(final_output_path, folder="final_videos")
-        thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
-        metadata = youtube_metadata_agent(full_script_text, keyword, form_data, blueprint)
-        
-        # Cleanup (omitted for brevity, assume it remains)
-
-        return {
-            "status": "ready",
-            "video_url": final_video_url,
-            "thumbnail_url": thumbnail_url,
-            "metadata": metadata,
-            "storyboard": storyboard
-        }
     except Exception as e:
-        logging.error(f"Task failed: {traceback.format_exc()}")
+        logging.error(f"Fatal Error: {traceback.format_exc()}")
         self.update_state(state="FAILURE", meta={"error": str(e)})
         raise
