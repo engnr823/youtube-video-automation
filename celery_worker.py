@@ -36,6 +36,18 @@ replicate_client = None
 
 from openai import OpenAI
 
+# --- CONSTANTS FOR VOICES AND AVATARS ---
+# Antoni (Male) - Use this for your avatar
+MALE_VOICE_ID = "ErXwobaYiN019PkySvjV" 
+# Rachel (Female) - Use this for female characters
+FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
+
+# Your Personal Avatar ID (Talking Photo)
+MY_AVATAR_ID = "4343bfb447bf4028a48b598ae297f5dc"
+# Public Female Avatar (Tyler)
+FEMALE_AVATAR_ID = "Avatar_Expressive_20240520_02"
+# ----------------------------------------
+
 # --- Utility Fix: Define missing ensure_dir function ---
 def ensure_dir(path):
     """Ensure that the given directory path exists."""
@@ -145,18 +157,9 @@ class StoryboardSchema(BaseModel):
     characters: Optional[List[dict]] = []
     scenes: List[SceneSchema]
 
-# --- CHARACTER DATABASE & VOICE MAPPING (Optimized for HeyGen roles) ---
+# --- CHARACTER DATABASE ---
 CHAR_DB_PATH = os.getenv("CHAR_DB_PATH", "/var/data/character_db.json")
 ensure_dir(str(Path(CHAR_DB_PATH).parent))
-
-# CRITICAL: HeyGen uses Avatars/Voices defined in its platform. We assume these are IDs.
-VOICE_MAPPING = {
-    "MENTOR": "21m00Tcm4TlvDq8ikWAM", 
-    "APPRENTICE": "E1I8m3QzU5nF1A7W2ePq",
-    "NARRATOR": "21m00Tcm4TlvDq8ikWAM",
-    "KABIR": "21m00Tcm4TlvDq8ikWAM", 
-    "ZARA": "E1I8m3QzU5nF1A7W2ePq"
-}
 
 def ensure_character(name: str, appearance_prompt: Optional[str] = None, reference_image_url: Optional[str] = None, voice_id: Optional[str] = None) -> dict:
     try:
@@ -287,15 +290,8 @@ def process_single_scene(
         # --- SAFETY FIX: Ensure Avatar ID exists or fallback ---
         if not avatar_id:
             logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Attempting stock fallback.")
-            try:
-                # Attempt to get a default male avatar if possible, or use a hardcoded safe ID
-                if get_stock_avatar:
-                    avatar_id = get_stock_avatar("male") 
-                else:
-                    # UPDATED FALLBACK TO SAFE PUBLIC AVATAR
-                    avatar_id = "Avatar_Expressive_20240520_01"
-            except:
-                pass
+            # Default to YOUR valid ID
+            avatar_id = MY_AVATAR_ID
 
         if not avatar_id:
              logging.error(f"Scene {index} SKIPPED: Missing Avatar ID. Cannot call HeyGen.")
@@ -312,9 +308,6 @@ def process_single_scene(
 
         # 3. Call the single HeyGen API function
         logging.info(f"Calling HeyGen for Scene {index} (Avatar: {avatar_id or 'B-roll'})")
-        
-        # NOTE: Using the CORRECTED HeyGen client function signature from the last fix.
-        # It expects aspect_ratio and background_color, NOT scene_prompt/scene_duration.
         
         video_url = generate_heygen_video(
             avatar_id=avatar_id,
@@ -434,37 +427,36 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
     try: return StoryboardSchema(**obj).dict()
     except ValidationError: return {"video_title": "Untitled", "scenes": obj.get("scenes", []), "characters": obj.get("characters", [])}
 
-def refine_script_with_roles(storyboard: dict, form_data: dict) -> List[dict]:
+def refine_script_with_roles(storyboard: dict, form_data: dict, char_faces: dict) -> List[dict]:
+    """
+    Refines script and assigns correct MALE/FEMALE voices.
+    """
     characters = storyboard.get('characters', [])
     full_script_text = " ".join([s.get('audio_narration', '') for s in storyboard.get('scenes', [])])
-    prompt = f"""
-    You are a Voice Director.
-    TASK: Convert this raw script into a STRICT JSON list of audio segments.
-    REAL CHARACTERS: {json.dumps(characters)}
-    RAW SCRIPT: "{full_script_text}"
-    OUTPUT FORMAT EXAMPLE:
-    [
-      {{"speaker": "Hero", "text": "Let's go."}},
-      {{"speaker": "Narrator", "text": "They left."}}
-    ]
-    """
-    try:
-        raw = get_openai_response(prompt, temperature=0.1, is_json=True)
-        segments = extract_json_list_from_text(raw) or []
-    except Exception: segments = []
-    if not isinstance(segments, list) or len(segments) == 0:
-        return [{"speaker": "Narrator", "text": full_script_text, "voice_id": form_data.get("voice_selection")}]
-    final_segments = []
-    main_voice_id = form_data.get("voice_selection") or "21m00Tcm4TlvDq8ikWAM"
-    for seg in segments:
-        speaker_name = seg.get("speaker", "Narrator")
-        text = seg.get("text", "")
+    
+    # Simple list of segments
+    segments = []
+    
+    for scene in storyboard.get("scenes", []):
+        text = scene.get("audio_narration", "")
         if not text: continue
-        voice = main_voice_id 
-        char_obj = next((c for c in characters if c.get("name") in speaker_name or speaker_name in c.get("name")), None)
-        if char_obj and char_obj.get("voice_id"): voice = char_obj.get("voice_id")
-        final_segments.append({"text": text, "voice_id": voice})
-    return final_segments
+        
+        # Determine character in this scene
+        char_list = scene.get('characters_in_scene', [])
+        char_name = char_list[0] if char_list else "Unknown"
+        char_data = char_faces.get(char_name, {})
+        
+        # Assign Voice ID
+        assigned_voice = MALE_VOICE_ID # Default to Male
+        
+        if char_data.get("heygen_avatar_id") == MY_AVATAR_ID:
+            assigned_voice = MALE_VOICE_ID
+        elif "female" in str(char_data) or "woman" in str(char_data):
+             assigned_voice = FEMALE_VOICE_ID
+             
+        segments.append({"text": text, "voice_id": assigned_voice})
+        
+    return segments
 
 # Function to generate a thumbnail using the image model (UPDATED FOR HIGH QUALITY)
 def generate_thumbnail_agent(storyboard: dict, orientation: str = "16:9") -> Optional[str]:
@@ -521,9 +513,6 @@ def background_generate_video(self, form_data: dict):
         
         # 1. Blueprint (Remains the same)
         update_status("Designing Video Concept...")
-        # NOTE: scrape_youtube_videos and analyze_competitors were implied in original worker, but not provided. Assuming they exist or are mocked outside of this file.
-        # scraped = scrape_youtube_videos(keyword) 
-        # blueprint = analyze_competitors(scraped) 
         scraped = {} # Mocked
         blueprint = {} # Mocked
         
@@ -551,12 +540,10 @@ def background_generate_video(self, form_data: dict):
                  desc = char.get("appearance_prompt", "").lower()
                  avatar_type = "female" if any(w in desc for w in ["woman", "female", "girl", "lady"]) else "male"
                  
-                 # Use the imported function
-                 if get_stock_avatar:
-                     heygen_avatar_id = get_stock_avatar(avatar_type)
+                 if avatar_type == "female":
+                     heygen_avatar_id = FEMALE_AVATAR_ID
                  else:
-                     # UPDATED FALLBACK TO SAFE PUBLIC AVATAR
-                     heygen_avatar_id = "Avatar_Expressive_20240520_01" 
+                     heygen_avatar_id = MY_AVATAR_ID # Default to YOUR ID for males
                  
                  char_data["heygen_avatar_id"] = heygen_avatar_id
                  char_data["reference_image"] = ref_image 
@@ -564,9 +551,7 @@ def background_generate_video(self, form_data: dict):
 
              except Exception as e:
                  logging.error(f"Failed to create/get HeyGen avatar for {name}: {e}")
-                 # Critical Fallback to prevent 400 error later
-                 # UPDATED FALLBACK TO SAFE PUBLIC AVATAR
-                 char_data["heygen_avatar_id"] = "Avatar_Expressive_20240520_01"
+                 char_data["heygen_avatar_id"] = MY_AVATAR_ID # Fallback to you
                  character_faces[name] = char_data
              # -----------------------------------------------------------------
         
@@ -574,13 +559,16 @@ def background_generate_video(self, form_data: dict):
 
         # 3. Audio Synthesis (Remains the same)
         update_status("Synthesizing Audio Dialogue...")
-        segments = refine_script_with_roles(storyboard, form_data)
+        
+        # Fix: Pass char_faces to refine_script so it can assign voices correctly
+        segments = refine_script_with_roles(storyboard, form_data, character_faces)
+        
         scene_assets = []
         full_script_text = ""
         for i, scene in enumerate(scenes):
             # ... (audio generation and scene_assets creation logic remains) ...
             text = segments[i].get("text") if i < len(segments) else "..."
-            voice_id = segments[i].get("voice_id") if i < len(segments) else "21m00Tcm4TlvDq8ikWAM"
+            voice_id = segments[i].get("voice_id") if i < len(segments) else MALE_VOICE_ID
             if voice_id: voice_id = voice_id.strip(" []'\"")
             full_script_text += text + " "
             audio_path = None
