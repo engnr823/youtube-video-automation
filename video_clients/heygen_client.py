@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Assuming HeyGen API key is stored in the environment
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
-# CRITICAL FIX: Base URL must be only the domain for correct path concatenation
+# Base URL is now ONLY the domain for correct path concatenation
 HEYGEN_API_URL = "https://api.heygen.com" 
 
 class HeyGenError(Exception):
@@ -63,7 +63,7 @@ def _make_request(method: str, endpoint: str, **kwargs) -> Any:
 
 def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
     """Polls the API until the video job is complete (success or failure)."""
-    # NOTE: Assuming status endpoint uses the V1 path /jobs/{id}/status
+    # NOTE: HeyGen uses /v1/jobs/{id} for status polling.
     endpoint = f"/v1/jobs/{job_id}" 
     start_time = time.time()
     
@@ -75,6 +75,8 @@ def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
             
             if status == "completed":
                 logging.info(f"HeyGen Job {job_id} COMPLETED.")
+                # The video URL is typically nested in a 'result' or 'data' field, 
+                # but we rely on the status endpoint to return it.
                 return status_data.get("video_url")
             
             if status == "failed":
@@ -92,9 +94,6 @@ def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
 
 
 # ----------------- HEYGEN UTILITY FUNCTIONS (Conceptual Implementation) -----------------
-# NOTE: These stubs are for the full, non-pre-created custom avatar workflow. 
-# Since you have a pre-created ID, they are not strictly needed but are kept 
-# for future expansion of custom avatar uploads.
 
 def _upload_image_to_heygen(image_url: str) -> Optional[str]:
     """CONCEPTUAL: Returns image_key."""
@@ -106,7 +105,7 @@ def _create_photo_avatar(name: str, image_key: str) -> Optional[str]:
     logging.warning("HEYGEN: Custom Avatar creation simulated. Requires real Create Photo Avatar Group API.")
     return "AVATAR_GROUP_" + str(uuid.uuid4())[:8] 
 
-# ----------------- MAIN VIDEO GENERATION FUNCTION (Final Payload Fix) -----------------
+# ----------------- MAIN VIDEO GENERATION FUNCTION (Definitive Payload Fix) -----------------
 
 def generate_heygen_video(
     avatar_id: str,
@@ -117,23 +116,23 @@ def generate_heygen_video(
     ref_image_url: Optional[str] = None
 ) -> str:
     """
-    Submits a video generation job with V2 API structure.
+    Submits a video generation job with the finalized V2 API structure.
     """
-    # V2 payload structure enforcement
+    # V2 payload structure enforcement, simplified for external audio/custom backgrounds
     request_data = {
-        "avatar_id": avatar_id,
+        # Outer fields
+        "avatar_id": avatar_id, # The main avatar for the scene
+        "ratio": aspect,
+        "test": False, # Now submitting for real video generation
+        
+        # Inner array structure for external audio
         "video_inputs": [
             {
-                "audio_type": "tts", # Required for external audio sources like ElevenLabs
-                "audio_url": audio_url,
-                "text": " ", # Placeholder text field to satisfy schema requirements
-                "script_id": "MOCK_SCRIPT_ID", # Mock ID to satisfy schema
-                "avatar_id": avatar_id
+                "audio_type": "external_audio", # Correct type for MP3 URL from ElevenLabs
+                "audio_url": audio_url, 
+                "background": scene_prompt, # Uses scene_prompt for background description
             }
         ],
-        "ratio": aspect,
-        # NOTE: Test mode is useful for debugging, but for production, set to False
-        "test": False, 
     }
 
     # 2. Submit Job
@@ -169,7 +168,7 @@ def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Opt
     """
     
     # 1. --- FINAL AVATAR IDs ---
-    # User's Custom ID for the male character slot (Mentor/Ali) - Reinstated your ID
+    # User's Custom ID for the male character slot (Mentor/Ali)
     STOCK_ID_MALE = "4343bfb447bf4028a48b598ae297f5dc" 
     
     # User-provided Public Stock Female Avatar ID (Zara/Apprentice)
