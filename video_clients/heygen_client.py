@@ -49,7 +49,6 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
         if response.status_code >= 400:
             try:
                 err_data = response.json()
-                # Extract deeper error message if available
                 detail = err_data.get("error", {}).get("message") or err_data.get("message")
                 logging.error(f"HeyGen API Error Detail: {detail}")
             except:
@@ -71,22 +70,18 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict
 
 
 # -------------------------------------------------
-# JOB POLLING (FIXED FOR V2)
+# JOB POLLING
 # -------------------------------------------------
 
 def _wait_for_job(video_id: str) -> str:
     """
     Polls the status of a video generated via V2 API.
-    Note: V2 uses /v2/video/status?video_id=...
     """
     logging.info(f"HeyGen Polling started for Video ID: {video_id}")
     start = time.time()
 
     while time.time() - start < MAX_WAIT_TIME:
-        # IMPORTANT: For V2 generation, we check status via video_id
         data = _request("GET", f"/v2/video/status?video_id={video_id}")
-        
-        # V2 response structure is usually {"data": {"status": "...", "video_url": "..."}}
         inner_data = data.get("data", {})
         status = inner_data.get("status")
 
@@ -119,6 +114,7 @@ def generate_heygen_video(
 ) -> str:
     """
     Generate HeyGen video using V2 API.
+    Automatically detects if the ID is a 'Talking Photo' or standard 'Avatar'.
     """
 
     if aspect_ratio == "9:16":
@@ -126,15 +122,27 @@ def generate_heygen_video(
     else:
         dimension = {"width": 1280, "height": 720}
 
-    # Structure payload for HeyGen V2 API
+    # --- CRITICAL FIX FOR YOUR AVATAR TYPE ---
+    # If the ID matches your uploaded photo avatar, we MUST use 'talking_photo' type.
+    if avatar_id == "4343bfb447bf4028a48b598ae297f5dc":
+        character_config = {
+            "type": "talking_photo",
+            "talking_photo_id": avatar_id
+        }
+        logging.info(f"Using TALKING PHOTO mode for ID: {avatar_id}")
+    else:
+        # Default behavior for standard avatars (like the female one)
+        character_config = {
+            "type": "avatar",
+            "avatar_id": avatar_id,
+            "avatar_style": "normal"
+        }
+        logging.info(f"Using STANDARD AVATAR mode for ID: {avatar_id}")
+
     payload = {
         "video_inputs": [
             {
-                "character": {
-                    "type": "avatar",
-                    "avatar_id": avatar_id,
-                    "avatar_style": "normal"
-                },
+                "character": character_config,
                 "voice": {
                     "type": "audio",
                     "audio_url": audio_url
@@ -148,40 +156,32 @@ def generate_heygen_video(
         "dimension": dimension
     }
 
-    logging.info(f"Submitting HeyGen V2 video job (Avatar: {avatar_id})...")
     response = _request("POST", "/v2/video/generate", payload)
 
-    # V2 returns {"data": {"video_id": "..."}}
     video_id = response.get("data", {}).get("video_id")
-    
     if not video_id:
-        # Fallback check for different response formats
         video_id = response.get("video_id") or response.get("job_id")
 
     if not video_id:
         logging.error(f"Invalid HeyGen Response: {response}")
-        raise HeyGenError("HeyGen did not return a video_id/job_id")
+        raise HeyGenError("HeyGen did not return a video_id")
 
     return _wait_for_job(video_id)
 
 
 # -------------------------------------------------
-# AVATAR HELPERS (UPDATED WITH YOUR IDS)
+# AVATAR HELPERS
 # -------------------------------------------------
 
 def get_stock_avatar(avatar_type: str = "male") -> str:
     """
-    Uses the specific IDs provided:
-    Male: Your personal image avatar
-    Female: HeyGen Public avatar
+    Returns the configured Avatar IDs.
     """
     AVATARS = {
-        "male": "4343bfb447bf4028a48b598ae297f5dc",   # Your ID
-        "female": "26f5fc9be1fc47eab0ef65df30d47a4e" # Public Female ID
+        "male": "4343bfb447bf4028a48b598ae297f5dc",   # Your Talking Photo
+        "female": "26f5fc9be1fc47eab0ef65df30d47a4e" # Public Female Avatar
     }
     
-    # Default to your male ID if type is not recognized
     fallback = "4343bfb447bf4028a48b598ae297f5dc" 
-
     avatar_id = AVATARS.get(avatar_type.lower(), fallback)
     return avatar_id
