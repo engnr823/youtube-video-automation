@@ -16,7 +16,7 @@ from string import Template
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 
-# --- CRITICAL FIX: Ensure Python can find sibling packages like 'video_clients' ---
+# --- CRITICAL FIX: Ensure Python can find sibling packages ---
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, WORKER_DIR) 
 # ---------------------------------------------------------------------------------
@@ -30,7 +30,7 @@ from pydantic import BaseModel, ValidationError
 # Celery app import
 from celery_init import celery
 
-# --- REPLICATE REMOVAL (Kept explicit None to avoid reference errors) ---
+# --- REPLICATE REMOVAL ---
 replicate = None 
 replicate_client = None 
 
@@ -40,7 +40,7 @@ from openai import OpenAI
 MALE_VOICE_ID = "ErXwobaYiN019PkySvjV" 
 FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
-# --- SAFE FALLBACK AVATAR (Josh Lite - Works on Free/Pro/Enterprise) ---
+# Safe "Lite" Avatar (Josh) that works on almost all plans to avoid 404s
 SAFE_FALLBACK_AVATAR_ID = "josh_lite3_20230714"
 
 # --- Utility Fix: Define missing ensure_dir function ---
@@ -87,14 +87,13 @@ except Exception:
 
 # --- CRITICAL FIX: ROBUST HEYGEN CLIENT IMPORT ---
 try:
-    from video_clients.heygen_client import generate_heygen_video, get_all_avatars, get_safe_fallback_id, HeyGenError
+    from video_clients.heygen_client import generate_heygen_video, get_stock_avatar, get_all_avatars, HeyGenError
     HEYGEN_AVAILABLE = True
 except ImportError as e:
     logging.error(f"❌ HEYGEN CLIENT NOT FOUND. Video generation will fail. IMPORT ERROR: {e}")
     generate_heygen_video = None
+    get_stock_avatar = None
     get_all_avatars = None
-    # Use local fallback if import fails
-    get_safe_fallback_id = lambda: SAFE_FALLBACK_AVATAR_ID
     HEYGEN_AVAILABLE = False
 
 
@@ -251,7 +250,7 @@ def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str 
 
 
 # -------------------------
-# Single scene processor (ROBUST VERSION)
+# Single scene processor (FIXED)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -260,7 +259,7 @@ def process_single_scene(
     audio_path: str = None,
     character_faces: dict = {},
     aspect: str = "9:16",
-    fallback_avatar_id: str = None # Passed from main task
+    fallback_avatar_id: str = None # NEW ARGUMENT
 ) -> dict:
     
     if not HEYGEN_AVAILABLE:
@@ -274,7 +273,6 @@ def process_single_scene(
         # 1. Identify Character/Avatar ID for this scene
         character_list = scene.get('characters_in_scene')
         
-        # --- Safely extract the character name ---
         target_char_name = character_list[0] if character_list and len(character_list) > 0 else None
         
         if not target_char_name:
@@ -282,16 +280,15 @@ def process_single_scene(
             
         char_data = character_faces.get(target_char_name, {})
         avatar_id = char_data.get("heygen_avatar_id") 
-        # -------------------------------------------------------
         
         # --- SAFETY FIX: Ensure Avatar ID exists or fallback ---
         if not avatar_id:
             logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Using dynamic fallback.")
             avatar_id = fallback_avatar_id
 
-        # Use safe fallback if still None
         if not avatar_id:
-            avatar_id = SAFE_FALLBACK_AVATAR_ID
+             # Final fallback if even dynamic failed
+             avatar_id = SAFE_FALLBACK_AVATAR_ID
 
         # 2. Upload Audio
         cloud_audio_url = None
@@ -302,7 +299,7 @@ def process_single_scene(
              logging.warning(f"Scene {index} skipped as required audio/avatar is missing.")
              return {"index": index, "video_path": None, "status": "skipped"}
 
-        # 3. Call HeyGen
+        # 3. Call the single HeyGen API function
         logging.info(f"Calling HeyGen for Scene {index} (Avatar: {avatar_id})")
         
         video_url = generate_heygen_video(
@@ -322,7 +319,7 @@ def process_single_scene(
         return {"index": index, "video_path": temp_video_path, "status": "success"}
 
     except Exception as e:
-        # Catch exception to allow other scenes to proceed if one fails
+        # CRITICAL: Log error but do not crash worker logic here; let main task handle failure count
         logging.error(f"Scene {index} failed: {traceback.format_exc()}")
         return {"index": index, "video_path": None, "status": "failed"}
     finally:
@@ -331,7 +328,7 @@ def process_single_scene(
              except Exception as e: logging.warning(f"Failed to clean up temp dir {temp_dir}: {e}")
 
 # -------------------------
-# Stitching
+# Stitching (FIXED & ROBUST)
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     request_id = str(uuid.uuid4())
@@ -339,39 +336,54 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
     os.makedirs(temp_dir, exist_ok=True)
     input_list_path = os.path.join(temp_dir, "inputs.txt")
     chunk_paths = []
+    
     try:
         logging.info(f"Processing {len(scene_pairs)} pairs")
         for i, (video, audio) in enumerate(scene_pairs):
             chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
             audio_dur = get_media_duration(audio)
             if audio_dur == 0: continue
+            
+            # CRITICAL FIX: Simplified FFmpeg command to avoid "Exit Code 254"
+            # We scale everything to 1080x1920 (9:16) to ensure consistent stitching
             cmd = [
-                "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
+                "ffmpeg", "-y", 
+                "-stream_loop", "-1", "-i", video, 
+                "-i", audio,
                 "-t", str(audio_dur),
                 "-map", "0:v", "-map", "1:a",
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
-                "-vf", "scale='min(720,iw)':-2",
-                "-preset", "ultrafast",
-                "-crf", "28",
+                "-preset", "ultrafast", # Speed over compression
+                # Ensure width/height are even and fit 9:16
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=30",
                 "-c:a", "aac",
                 "-shortest",
                 chunk_name
             ]
-            subprocess.run(cmd, check=True, capture_output=True)
-            chunk_paths.append(chunk_name)
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+                chunk_paths.append(chunk_name)
+            except subprocess.CalledProcessError as e:
+                logging.error(f"FFmpeg chunk {i} failed: {e.stderr.decode() if e.stderr else 'Unknown error'}")
+                continue
 
-        if not chunk_paths: return False
+        if not chunk_paths: 
+            logging.error("No chunks were created successfully.")
+            return False
 
         with open(input_list_path, "w") as f:
             for chunk in chunk_paths:
                 abs_path = os.path.abspath(chunk).replace("'", "'\\''")
                 f.write(f"file '{abs_path}'\n")
 
+        # Concat chunks
         subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", input_list_path, "-c", "copy", output_path
         ], check=True, capture_output=True)
+        
         return True
     except Exception as e:
         logging.error(f"Stitching error: {e}")
@@ -381,7 +393,7 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
 
 
 # -------------------------
-# AGENTS
+# AGENTS (Kept)
 # -------------------------
 
 def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: bool = False) -> str:
@@ -492,7 +504,8 @@ def background_generate_video(self, form_data: dict):
     logging.info(f"[{task_id}] SaaS Task started.")
     if not HEYGEN_AVAILABLE:
         logging.error("Task aborted: HeyGen client is not configured.")
-        raise RuntimeError("Video generation failed: HEYGEN_AVAILABLE is False.")
+        # Return cleanly instead of raising Exception to avoid Worker crash
+        return {"status": "error", "message": "HeyGen client not available"}
 
     try:
         def update_status(msg):
@@ -506,16 +519,15 @@ def background_generate_video(self, form_data: dict):
         update_status("Fetching Available Avatars...")
         valid_avatar_id = None
         try:
-            # 1. Try to fetch dynamic list
             if get_all_avatars:
                 avatars = get_all_avatars()
                 if avatars and len(avatars) > 0:
                     valid_avatar_id = avatars[0].get("avatar_id")
-                    logging.info(f"✅ Auto-selected valid avatar ID from account: {valid_avatar_id}")
+                    logging.info(f"✅ Auto-selected valid avatar ID: {valid_avatar_id}")
             
-            # 2. Use Safe Fallback if dynamic fetch failed or empty
+            # Use Fallback if fetch failed or returned empty
             if not valid_avatar_id:
-                logging.warning(f"⚠️ No avatars found in account. Using SAFE fallback: {SAFE_FALLBACK_AVATAR_ID}")
+                logging.warning("⚠️ No avatars found in account. Using SAFE fallback.")
                 valid_avatar_id = SAFE_FALLBACK_AVATAR_ID
                 
         except Exception as e:
@@ -543,7 +555,7 @@ def background_generate_video(self, form_data: dict):
              char_data = ensure_character(name, appearance_prompt=char.get("appearance_prompt"))
              ref_image = next((url for url in uploaded_images if name.lower() in url.lower()), None)
              
-             # Pass the VALID avatar ID we resolved earlier
+             # Fallback to the auto-detected valid ID
              char_data["heygen_avatar_id"] = valid_avatar_id
              char_data["reference_image"] = ref_image 
              character_faces[name] = char_data
@@ -594,7 +606,7 @@ def background_generate_video(self, form_data: dict):
                     asset["audio_path"], 
                     character_faces, 
                     aspect,
-                    valid_avatar_id # NEW ARGUMENT
+                    valid_avatar_id # NEW ARG
                 ): asset
                 for asset in scene_assets
             }
@@ -626,7 +638,10 @@ def background_generate_video(self, form_data: dict):
         temp_visual_path = f"/tmp/visual_base_{task_id}.mp4"
         
         success = stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path)
-        if not success: raise RuntimeError("Stitching failed.")
+        if not success: 
+            # If stitching fails, we log it but don't crash hard - we return error dict
+            logging.error("Final stitching failed in optimized function.")
+            return {"status": "error", "message": "Stitching failed during final assembly."}
         
         # Final audio mix
         if music_path:
@@ -655,8 +670,9 @@ def background_generate_video(self, form_data: dict):
             "storyboard": storyboard
         }
     except Exception as e:
-        # Logging only; error will be raised
-        logging.error(f"Task failed: {traceback.format_exc()}")
-        self.update_state(state="FAILURE", meta={"error": str(e)})
-        # This raise ensures celery catches it, but we suppress the complex serialization error by raising simple one
-        raise RuntimeError(f"Task failed: {str(e)}")
+        # CRITICAL FIX: Return a clean error dictionary instead of raising exception
+        # This prevents the Celery worker from crashing due to serialization issues
+        error_message = f"Workflow failed: {str(e)}"
+        logging.error(f"Task Exception Caught: {traceback.format_exc()}")
+        self.update_state(state="FAILURE", meta={"error": error_message})
+        return {"status": "error", "message": error_message}
