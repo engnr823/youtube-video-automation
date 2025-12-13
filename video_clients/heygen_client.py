@@ -1,196 +1,158 @@
-# file: video_clients/heygen_client.py
-
 import os
 import time
 import requests
 import logging
-import uuid
-from typing import Optional, Any
-from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+from typing import Optional, Dict, Any
 
-# Configure logging
+# -------------------------------------------------
+# CONFIG
+# -------------------------------------------------
+
+HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
+HEYGEN_BASE_URL = "https://api.heygen.com"
+
+POLL_INTERVAL = 5        # seconds
+MAX_WAIT_TIME = 600      # seconds (10 minutes)
+
 logging.basicConfig(level=logging.INFO)
 
-# Assuming HeyGen API key is stored in the environment
-HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
-# Base URL is now ONLY the domain for correct path concatenation
-HEYGEN_API_URL = "https://api.heygen.com" 
+
+# -------------------------------------------------
+# EXCEPTIONS
+# -------------------------------------------------
 
 class HeyGenError(Exception):
-    """Custom exception for HeyGen API errors."""
     pass
 
-def retry_if_job_not_ready(exception):
-    """Retry condition: only retry if the job is processing or pending."""
-    return isinstance(exception, HeyGenError) and ("processing" in str(exception) or "pending" in str(exception))
 
-def _make_request(method: str, endpoint: str, **kwargs) -> Any:
-    """Handles API requests and common error checking."""
+# -------------------------------------------------
+# LOW LEVEL REQUEST HANDLER
+# -------------------------------------------------
+
+def _request(method: str, endpoint: str, payload: Optional[Dict] = None) -> Dict[str, Any]:
     if not HEYGEN_API_KEY:
-        raise HeyGenError("HEYGEN_API_KEY is not set.")
-    
-    # HeyGen V2 requires the API key in the header
-    headers = {"X-Api-Key": HEYGEN_API_KEY, "Content-Type": "application/json"}
-    
+        raise HeyGenError("HEYGEN_API_KEY is missing")
+
+    headers = {
+        "X-Api-Key": HEYGEN_API_KEY,
+        "Content-Type": "application/json"
+    }
+
     try:
         response = requests.request(
-            method,
-            f"{HEYGEN_API_URL}{endpoint}",
+            method=method,
+            url=f"{HEYGEN_BASE_URL}{endpoint}",
             headers=headers,
-            timeout=30,
-            **kwargs
+            json=payload,
+            timeout=40
         )
         response.raise_for_status()
         return response.json()
-    
+
     except requests.exceptions.HTTPError as e:
-        status_code = e.response.status_code
-        
-        # Robust Error Detail Extraction
-        error_detail = f"API Error {status_code}"
         try:
-            error_data = e.response.json()
-            error_detail = error_data.get('detail', error_data.get('message', error_detail))
-        except requests.exceptions.JSONDecodeError:
-            error_detail = f"Non-JSON response for status {status_code}: {e.response.text[:150]}..."
+            data = e.response.json()
+            message = data.get("message") or data.get("detail") or str(data)
         except Exception:
-            pass
-        
-        raise HeyGenError(f"API Request Failed ({status_code}): {error_detail}") from e
+            message = e.response.text[:200]
+
+        raise HeyGenError(f"HeyGen API ERROR [{e.response.status_code}]: {message}")
+
     except Exception as e:
-        raise HeyGenError(f"Network Error: {e}") from e
+        raise HeyGenError(f"HeyGen Network Error: {str(e)}")
 
 
-def _poll_job_status(job_id: str, max_wait: int = 400) -> str:
-    """Polls the API until the video job is complete (success or failure)."""
-    # NOTE: HeyGen uses /v1/jobs/{id} for status polling.
-    endpoint = f"/v1/jobs/{job_id}" 
-    start_time = time.time()
-    
-    while time.time() - start_time < max_wait:
-        time.sleep(5) # Poll every 5 seconds
-        try:
-            status_data = _make_request("GET", endpoint)
-            status = status_data.get("status", "pending")
-            
-            if status == "completed":
-                logging.info(f"HeyGen Job {job_id} COMPLETED.")
-                # The video URL is typically nested in a 'result' or 'data' field, 
-                # but we rely on the status endpoint to return it.
-                return status_data.get("video_url")
-            
-            if status == "failed":
-                error_msg = status_data.get("error_message", "Job failed for unknown reason.")
-                raise HeyGenError(f"Job {job_id} failed: {error_msg}")
-            
-            logging.info(f"HeyGen Job {job_id} status: {status}. Polling...")
-            
-        except HeyGenError as e:
-            if "Job failed" in str(e):
-                 raise
-            logging.warning(f"Polling error for Job {job_id}: {e}")
-            
-    raise HeyGenError(f"Job {job_id} timed out after {max_wait} seconds.")
+# -------------------------------------------------
+# JOB POLLING
+# -------------------------------------------------
+
+def _wait_for_job(job_id: str) -> str:
+    logging.info(f"HeyGen Job started: {job_id}")
+    start = time.time()
+
+    while time.time() - start < MAX_WAIT_TIME:
+        time.sleep(POLL_INTERVAL)
+
+        data = _request("GET", f"/v1/jobs/{job_id}")
+        status = data.get("status")
+
+        logging.info(f"HeyGen Job {job_id} status: {status}")
+
+        if status == "completed":
+            result = data.get("result", {})
+            video_url = result.get("video_url")
+            if not video_url:
+                raise HeyGenError("Job completed but video_url missing")
+            return video_url
+
+        if status == "failed":
+            error = data.get("error_message", "Unknown failure")
+            raise HeyGenError(f"HeyGen job failed: {error}")
+
+    raise HeyGenError("HeyGen job timeout")
 
 
-# ----------------- HEYGEN UTILITY FUNCTIONS (Conceptual Implementation) -----------------
-
-def _upload_image_to_heygen(image_url: str) -> Optional[str]:
-    """CONCEPTUAL: Returns image_key."""
-    logging.warning("HEYGEN: Custom Avatar creation simulated. Requires real Upload Asset API.")
-    return "MOCK_IMAGE_KEY_" + str(uuid.uuid4())[:8]
-
-def _create_photo_avatar(name: str, image_key: str) -> Optional[str]:
-    """CONCEPTUAL: Creates a Photo Avatar Group. Returns avatar_id."""
-    logging.warning("HEYGEN: Custom Avatar creation simulated. Requires real Create Photo Avatar Group API.")
-    return "AVATAR_GROUP_" + str(uuid.uuid4())[:8] 
-
-# ----------------- MAIN VIDEO GENERATION FUNCTION (Definitive Payload Fix) -----------------
+# -------------------------------------------------
+# MAIN VIDEO GENERATION
+# -------------------------------------------------
 
 def generate_heygen_video(
     avatar_id: str,
     audio_url: str,
-    scene_prompt: str,
-    scene_duration: float,
-    aspect: str,
-    ref_image_url: Optional[str] = None
+    aspect_ratio: str = "9:16",
+    background_color: str = "#000000"
 ) -> str:
     """
-    Submits a video generation job with the finalized V2 API structure.
+    Generate HeyGen video using external audio.
     """
-    # V2 payload structure enforcement, simplified for external audio/custom backgrounds
-    request_data = {
-        # Outer fields
-        "avatar_id": avatar_id, # The main avatar for the scene
-        "ratio": aspect,
-        "test": False, # Now submitting for real video generation
-        
-        # Inner array structure for external audio
+
+    if aspect_ratio == "9:16":
+        dimension = {"width": 1080, "height": 1920}
+    else:
+        dimension = {"width": 1280, "height": 720}
+
+    payload = {
+        "avatar_id": avatar_id,
+        "dimension": dimension,
         "video_inputs": [
             {
-                "audio_type": "external_audio", # Correct type for MP3 URL from ElevenLabs
-                "audio_url": audio_url, 
-                "background": scene_prompt, # Uses scene_prompt for background description
+                "audio": {
+                    "type": "audio_url",
+                    "url": audio_url
+                },
+                "background": {
+                    "type": "color",
+                    "value": background_color
+                }
             }
-        ],
+        ]
     }
 
-    # 2. Submit Job
-    logging.info(f"HeyGen: Submitting job for Avatar ID {avatar_id} with aspect {aspect}...")
-    
-    # CRITICAL FIX: Using the /v2/video/generate endpoint.
-    submission_data = _make_request("POST", "/v2/video/generate", json=request_data)
-    
-    job_id = submission_data.get("job_id")
-    
+    logging.info("Submitting HeyGen video job...")
+    response = _request("POST", "/v2/video/generate", payload)
+
+    job_id = response.get("job_id")
     if not job_id:
-        video_url = submission_data.get("video_url")
-        if video_url:
-             logging.info("HeyGen Job COMPLETED synchronously.")
-             return video_url
-        
-        raise HeyGenError("Job submission failed to return a Job ID or Video URL.")
+        raise HeyGenError("HeyGen did not return job_id")
 
-    # 3. Poll Status
-    video_url = _poll_job_status(job_id)
-    
-    if not video_url:
-        raise HeyGenError("Job completed but returned no video URL.")
-        
-    return video_url
+    return _wait_for_job(job_id)
 
 
-# ----------------- MAIN AVATAR CREATION LOGIC (Final ID Configuration) -----------------
+# -------------------------------------------------
+# AVATAR HELPERS (SAFE & REPLACEABLE)
+# -------------------------------------------------
 
-def create_or_get_avatar(char_name: str, ref_image: Optional[str] = None) -> Optional[str]:
+def get_stock_avatar(avatar_type: str = "male") -> str:
     """
-    Handles multi-mode character assignment: Custom Avatar (for Mentor) or Stock Avatar (for Apprentice).
+    Replace these IDs with avatars from YOUR HeyGen dashboard.
     """
-    
-    # 1. --- FINAL AVATAR IDs ---
-    # User's Custom ID for the male character slot (Mentor/Ali)
-    STOCK_ID_MALE = "4343bfb447bf4028a48b598ae297f5dc" 
-    
-    # User-provided Public Stock Female Avatar ID (Zara/Apprentice)
-    STOCK_ID_FEMALE = "26f5fc9be1fc47eab0ef65df30d47a4e" 
-    # ---------------------------
+    AVATARS = {
+        "male": "4343bfb447bf4028a48b598ae297f5dc",
+        "female": "26f5fc9be1fc47eab0ef65df30d47a4e"
+    }
 
-    # 2. Custom Avatar Mode (User Uploaded Image)
-    if ref_image and ref_image.startswith("http"):
-        name_key = char_name.upper()
-        
-        if name_key in ('ALI', 'KABIR', 'MENTOR') or 'MALE' in name_key:
-            logging.warning(f"Custom Avatar Mode active. Using user's pre-created ID: {STOCK_ID_MALE}")
-            return STOCK_ID_MALE
+    avatar_id = AVATARS.get(avatar_type.lower())
+    if not avatar_id:
+        raise HeyGenError("Invalid avatar type")
 
-    # 3. Stock Avatar Mode (Default Fallback)
-    
-    name_key = char_name.upper()
-
-    if name_key in ('ALI', 'KABIR', 'MENTOR') or 'MALE' in name_key:
-         return STOCK_ID_MALE
-    elif name_key in ('ZARA', 'APPRENTICE') or 'FEMALE' in name_key:
-         return STOCK_ID_FEMALE
-    
-    # Final default fallback
-    return STOCK_ID_MALE
+    return avatar_id
