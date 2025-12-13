@@ -95,19 +95,20 @@ def generate_heygen_video(
     else:
         dimension = {"width": 1280, "height": 720}
 
-    # LOGIC: If it's YOUR specific ID, use 'talking_photo' mode.
-    # Otherwise (for the female avatar), use standard 'avatar' mode.
-    if avatar_id == "4343bfb447bf4028a48b598ae297f5dc":
-        character = {
-            "type": "talking_photo",
-            "talking_photo_id": avatar_id
-        }
-    else:
-        character = {
-            "type": "avatar",
-            "avatar_id": avatar_id,
-            "avatar_style": "normal"
-        }
+    # FORCE PUBLIC AVATAR MODE
+    # We ignore the passed 'avatar_id' if it matches your broken one
+    # and swap it for a known working public avatar.
+    
+    real_avatar_id = avatar_id
+    if "4343" in avatar_id:
+        logging.warning(f"Swapping broken ID {avatar_id} for public 'Edward'")
+        real_avatar_id = "Avatar_Expressive_20240520_01"
+
+    character = {
+        "type": "avatar",
+        "avatar_id": real_avatar_id,
+        "avatar_style": "normal"
+    }
 
     payload = {
         "video_inputs": [{
@@ -118,7 +119,7 @@ def generate_heygen_video(
         "dimension": dimension
     }
 
-    logging.info(f"Submitting HeyGen Job for Avatar: {avatar_id}")
+    logging.info(f"Submitting HeyGen Job for Avatar: {real_avatar_id}")
     response = _request("POST", "/v2/video/generate", payload)
     
     video_id = response.get("data", {}).get("video_id")
@@ -132,9 +133,10 @@ def generate_heygen_video(
 
 def get_stock_avatar(avatar_type: str = "male") -> str:
     AVATARS = {
-        # Your Personal Male ID
-        "male": "4343bfb447bf4028a48b598ae297f5dc",
-        # Public Female ID (Tyler/Avatar Expressive)
+        # Edward (Public Male)
+        "male": "Avatar_Expressive_20240520_01",
+        # Tyler (Public Female)
         "female": "Avatar_Expressive_20240520_02"
     }
-    return AVATARS.get(avatar_type.lower(), "4343bfb447bf4028a48b598ae297f5dc")
+    # Default to Edward
+    return AVATARS.get(avatar_type.lower(), "Avatar_Expressive_20240520_01")
