@@ -1,8 +1,10 @@
+# file: video_clients/heygen_client.py
 import os
 import time
 import requests
 import logging
 from typing import Optional, Dict, Any, List
+import random
 
 # -------------------------------------------------
 # CONFIG
@@ -10,17 +12,25 @@ from typing import Optional, Dict, Any, List
 
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
 HEYGEN_BASE_URL = "https://api.heygen.com"
-SAFE_AVATAR_ID = "josh_lite3_20230714" 
+
+# --- CRITICAL FIX: UPDATED BACKUP AVATAR LIST ---
+# If your account has no avatars, we rotate through these public stock IDs.
+BACKUP_STOCK_AVATARS = [
+    "daf0aeb75914449980d4407b1e427d14", # Pierce (Generic Male)
+    "0f82e18b45614ee28864700057e494a8", # Wayne (Generic Male)
+    "a83859550e6347149a4253109a933de3"  # Fin (Generic Male)
+]
+# Fallback if list fails
+SAFE_AVATAR_ID = "daf0aeb75914449980d4407b1e427d14" 
 
 # Standard Green Screen color for potential chroma keying
 GREEN_SCREEN_COLOR = "#00B140"
 
-# Increased polling settings for stability
 POLL_INTERVAL = 10       
-MAX_WAIT_TIME = 600      # 10 minutes
+MAX_WAIT_TIME = 600      
 
 logging.basicConfig(level=logging.INFO)
-logging.info("*** NEW HEYGEN CLIENT CODE LOADED (v7-BACKGROUNDS) ***")
+logging.info("*** NEW HEYGEN CLIENT CODE LOADED (v8-ROBUST-STOCK) ***")
 
 class HeyGenError(Exception):
     pass
@@ -30,9 +40,6 @@ class HeyGenError(Exception):
 # -------------------------------------------------
 
 def _request(method: str, endpoint: str, payload: Optional[Dict] = None, timeout: int = 120) -> Dict[str, Any]:
-    """
-    Sends HTTP requests with robust error handling for API V2.
-    """
     if not HEYGEN_API_KEY:
         raise HeyGenError("HEYGEN_API_KEY is missing")
 
@@ -50,7 +57,7 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None, timeout
             timeout=timeout
         )
         
-        # Handle 404 gracefully during status checks (job initializing)
+        # Swallow 404s during polling (job initializing)
         if response.status_code == 404 and "status" in endpoint:
             logging.warning(f"Status 404 for {endpoint}. Retrying...")
             return None
@@ -60,7 +67,6 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None, timeout
                 err_data = response.json()
                 msg = err_data.get("error", {}).get("message") or err_data.get("message")
                 
-                # Check for specific avatar errors to trigger fallback
                 if "not found" in str(msg).lower():
                     raise HeyGenError(f"AVATAR_NOT_FOUND: {msg}")
                 
@@ -75,7 +81,6 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None, timeout
     except HeyGenError:
         raise
     except Exception as e:
-        # Swallow 404 errors during polling
         if "404" in str(e) and "status" in endpoint:
             return None
         raise HeyGenError(f"HeyGen Error: {str(e)}")
@@ -86,7 +91,8 @@ def _request(method: str, endpoint: str, payload: Optional[Dict] = None, timeout
 
 def get_all_avatars() -> List[Dict]:
     """
-    Fetches available avatars. Retries on timeout.
+    Fetches available avatars. If empty, returns generic STOCK avatars
+    so the pipeline doesn't crash.
     """
     retries = 2
     for attempt in range(retries + 1):
@@ -95,11 +101,23 @@ def get_all_avatars() -> List[Dict]:
             data = _request("GET", "/v2/avatars", timeout=120)
             if data:
                 avatars = data.get("data", {}).get("avatars", [])
+                
+                # --- CRITICAL FIX: Handle Empty Account ---
+                if not avatars:
+                    logging.warning("⚠️ No Personal Avatars found! Injecting Stock Backups.")
+                    return [
+                        {"avatar_id": pid, "name": f"Stock_Backup_{i}"} 
+                        for i, pid in enumerate(BACKUP_STOCK_AVATARS)
+                    ]
+                
                 logging.info(f"✅ Found {len(avatars)} avatars.")
                 return avatars
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Avatar fetch failed: {e}")
             time.sleep(2)
-    return []
+            
+    # Final safety net
+    return [{"avatar_id": SAFE_AVATAR_ID, "name": "System_Fallback"}]
 
 def get_safe_fallback_id():
     return SAFE_AVATAR_ID
@@ -110,11 +128,10 @@ def get_safe_fallback_id():
 
 def _wait_for_job(video_id: str) -> str:
     logging.info(f"HeyGen Polling for Video ID: {video_id}")
-    time.sleep(15) # Allow job to register
+    time.sleep(15) 
     start = time.time()
     
     while time.time() - start < MAX_WAIT_TIME:
-        # Use V1 status endpoint for reliability
         data = _request("GET", f"/v1/video_status.get?video_id={video_id}")
         
         if data is None:
@@ -123,8 +140,7 @@ def _wait_for_job(video_id: str) -> str:
 
         inner = data.get("data", {})
         status = inner.get("status")
-        logging.info(f"Video Status: {status}")
-
+        
         if status == "completed":
             url = inner.get("video_url")
             if url: return url
@@ -147,23 +163,18 @@ def generate_heygen_video(
     background_image_url: str = None,
     background_color: str = "#000000"
 ) -> str:
-    """
-    Generates a video scene. Supports background images.
-    """
     
-    # 1. Dimensions
     if aspect_ratio == "9:16":
         dimension = {"width": 1080, "height": 1920}
     else:
         dimension = {"width": 1280, "height": 720}
 
-    # 2. Configure Background
     if background_image_url:
         background = {"type": "image", "url": background_image_url}
     else:
         background = {"type": "color", "value": background_color}
 
-    # 3. Build Payload
+    # Standardize Payload
     payload = {
         "video_inputs": [{
             "character": {
@@ -180,21 +191,29 @@ def generate_heygen_video(
         "dimension": dimension
     }
 
-    # 4. Submit with Fallback
     try:
-        logging.info(f"Submitting Job: Avatar={avatar_id}, BG={'Image' if background_image_url else 'Color'}")
+        logging.info(f"Submitting Job: Avatar={avatar_id}")
         response = _request("POST", "/v2/video/generate", payload)
     
     except HeyGenError as e:
-        # Retry with Safe Avatar if original was not found
-        if "AVATAR_NOT_FOUND" in str(e) and avatar_id != SAFE_AVATAR_ID:
-            logging.warning(f"🚨 Avatar {avatar_id} not found. Retrying with {SAFE_AVATAR_ID}...")
-            payload["video_inputs"][0]["character"]["avatar_id"] = SAFE_AVATAR_ID
-            response = _request("POST", "/v2/video/generate", payload)
+        # --- CRITICAL FIX: ROTATING FALLBACK ---
+        # If the requested avatar is dead, try the backups
+        if "AVATAR_NOT_FOUND" in str(e):
+            logging.warning(f"🚨 Avatar {avatar_id} failed. Trying backup stock avatar...")
+            
+            # Pick a random backup that isn't the one we just tried
+            backup_id = random.choice(BACKUP_STOCK_AVATARS)
+            payload["video_inputs"][0]["character"]["avatar_id"] = backup_id
+            
+            try:
+                logging.info(f"♻️ Retrying with Backup: {backup_id}")
+                response = _request("POST", "/v2/video/generate", payload)
+            except Exception as final_e:
+                logging.error("All backups failed.")
+                raise final_e
         else:
             raise e
 
-    # 5. Get Video ID
     video_id = response.get("data", {}).get("video_id")
     if not video_id:
         video_id = response.get("video_id") or response.get("job_id")
