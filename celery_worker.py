@@ -41,7 +41,9 @@ MALE_VOICE_ID = "ErXwobaYiN019PkySvjV"
 FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
 # Safe "Lite" Avatar (Josh) that works on almost all plans to avoid 404s
-SAFE_FALLBACK_AVATAR_ID = "josh_lite3_20230714"
+SAFE_FALLBACK_AVATAR_ID = "josh_lite3_20230714" 
+# Backup Male ID if found in list
+BACKUP_MALE_ID = "daf0aeb75914449980d4407b1e427d14" # Pierce
 
 # --- Utility Fix: Define missing ensure_dir function ---
 def ensure_dir(path):
@@ -57,28 +59,12 @@ except Exception:
     VoiceSettings = None
     logging.warning("⚠️ ElevenLabs VoiceSettings not found. Using default voice stability.")
 
-# --- UTILS IMPORT SAFETY BLOCK (Updated for Composite) ---
+# --- UTILS IMPORT SAFETY BLOCK ---
 try:
     from utils.ffmpeg_utils import get_media_duration, composite_green_screen_scene
 except Exception:
-    def get_media_duration(file_path):
-        # Fallback implementation
-        try:
-            if not os.path.exists(file_path): return 0.0
-            cmd = [
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1", file_path
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            val = result.stdout.strip()
-            return float(val) if val else 0.0
-        except Exception as e:
-            logging.error(f"Error getting duration for {file_path}: {e}")
-            return 0.0
-            
-    def composite_green_screen_scene(bg, fg, out):
-        logging.error("composite_green_screen_scene function missing.")
-        return False
+    def get_media_duration(file_path): return 0.0
+    def composite_green_screen_scene(bg, fg, out): return False
 
 # --- CLIENT IMPORT SAFETY BLOCK (ELEVENLABS) ---
 try:
@@ -102,7 +88,6 @@ except ImportError as e:
     logging.error(f"❌ HEYGEN CLIENT NOT FOUND. Video generation will fail. IMPORT ERROR: {e}")
     generate_heygen_video = None
     get_all_avatars = None
-    # Use local fallback if import fails
     get_safe_fallback_id = lambda: SAFE_FALLBACK_AVATAR_ID
     HEYGEN_AVAILABLE = False
 
@@ -249,16 +234,10 @@ def extract_json_list_from_text(text: str) -> Optional[list]:
 # Image generation (UPGRADED: DALL-E 3)
 # -------------------------
 def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str = "") -> str:
-    """
-    Generates a background image using DALL-E 3 or falls back to a placeholder.
-    This creates the 'Scene' for the avatar to stand in.
-    """
     if openai_client:
         try:
             logging.info(f"🎨 Generating background with DALL-E 3: {prompt[:30]}...")
-            # Map aspect ratio to DALL-E supported sizes
             size = "1024x1792" if aspect == "9:16" else "1024x1024"
-            
             response = openai_client.images.generate(
                 model="dall-e-3",
                 prompt=f"Cinematic movie scene, {prompt}, photorealistic, 8k, highly detailed background, no text, atmospheric lighting",
@@ -289,7 +268,7 @@ def process_single_scene(
     character_faces: dict = {},
     aspect: str = "9:16",
     fallback_avatar_id: str = None,
-    background_url: str = None # NEW: Receive Generated Background
+    background_url: str = None 
 ) -> dict:
     
     if not HEYGEN_AVAILABLE:
@@ -340,13 +319,12 @@ def process_single_scene(
         # --- 4. HEYGEN GENERATION (GREEN SCREEN) ---
         logging.info(f"Calling HeyGen for Green Screen Scene {index} (Avatar: {avatar_id})")
         
-        # NOTE: video_clients/heygen_client.py must be updated to support use_green_screen
         video_url = generate_heygen_video(
             avatar_id=avatar_id,
             audio_url=cloud_audio_url,
             aspect_ratio=aspect, 
-            background_image_url=None, # DO NOT pass background to HeyGen
-            use_green_screen=True      # REQUEST Green Screen
+            background_image_url=None, 
+            use_green_screen=True      
         )
 
         if not video_url:
@@ -371,31 +349,27 @@ def process_single_scene(
             except Exception as e:
                 logging.error(f"Composite crashed scene {index}: {e}")
 
-        # Fallback if composite failed or no BG: use raw green screen (or ideally a black bg fallback)
+        # Fallback
         if not composite_success:
             logging.warning(f"Composite failed for scene {index}, using raw video.")
             if os.path.exists(green_screen_path):
                 shutil.copy(green_screen_path, final_scene_path)
         
-        # CRITICAL: Verify file exists
         if not os.path.exists(final_scene_path):
              logging.error(f"Scene {index} reported success but file is missing at {final_scene_path}")
              return {"index": index, "video_path": None, "status": "failed"}
 
-        # CRITICAL: DO NOT DELETE TEMP DIR HERE. It is needed for stitching.
-        
         return {"index": index, "video_path": final_scene_path, "status": "success"}
 
     except Exception as e:
         logging.error(f"Scene {index} failed: {traceback.format_exc()}")
-        # Cleanup only on failure
         if os.path.exists(temp_dir): 
              try: shutil.rmtree(temp_dir)
              except: pass
         return {"index": index, "video_path": None, "status": "failed"}
 
 # -------------------------
-# Stitching (FIXED: ROBUST FFMPEG FILTER)
+# Stitching
 # -------------------------
 def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], output_path: str) -> bool:
     request_id = str(uuid.uuid4())
@@ -407,19 +381,11 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
     try:
         logging.info(f"Processing {len(scene_pairs)} pairs for stitching...")
         for i, (video, audio) in enumerate(scene_pairs):
-            if not os.path.exists(video):
-                logging.error(f"Stitching Input Missing: {video}")
-                continue
+            if not os.path.exists(video): continue
 
             chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
             audio_dur = get_media_duration(audio)
-            
-            # Use 5 seconds if audio duration fails (fallback)
             if audio_dur <= 0: audio_dur = 5.0
-            
-            # --- CRITICAL FIX: STANDARDIZE RESOLUTION & PIXEL FORMAT ---
-            # This prevents the "Exit Status 254" caused by varying inputs.
-            # We standardize to 1080x1920 (9:16) which matches the mobile reel target.
             
             cmd = [
                 "ffmpeg", "-y", 
@@ -430,34 +396,21 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
                 "-preset", "ultrafast",
-                # Complex filter to Scale, Pad, and Force FPS
                 "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=30",
                 "-c:a", "aac",
                 "-shortest",
                 chunk_name
             ]
-            
-            try:
-                subprocess.run(cmd, check=True, capture_output=True)
-                if os.path.exists(chunk_name):
-                    chunk_paths.append(chunk_name)
-                else:
-                    logging.error(f"FFmpeg chunk {i} failed to create output file.")
-            except subprocess.CalledProcessError as e:
-                # Log detailed error from FFmpeg stderr
-                logging.error(f"FFmpeg chunk {i} failed: {e.stderr.decode() if e.stderr else 'Unknown Error'}")
-                continue
+            subprocess.run(cmd, check=True, capture_output=True)
+            chunk_paths.append(chunk_name)
 
-        if not chunk_paths: 
-            logging.error("No chunks were successfully created for stitching.")
-            return False
+        if not chunk_paths: return False
 
         with open(input_list_path, "w") as f:
             for chunk in chunk_paths:
                 abs_path = os.path.abspath(chunk).replace("'", "'\\''")
                 f.write(f"file '{abs_path}'\n")
 
-        # Final Concat
         subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", input_list_path, "-c", "copy", output_path
@@ -473,7 +426,7 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
 
 
 # -------------------------
-# AGENTS (Kept)
+# AGENTS
 # -------------------------
 
 def get_openai_response(prompt_content: str, temperature: float = 0.7, is_json: bool = False) -> str:
@@ -516,28 +469,20 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
     except ValidationError: return {"video_title": "Untitled", "scenes": obj.get("scenes", []), "characters": obj.get("characters", [])}
 
 def refine_script_with_roles(storyboard: dict, form_data: dict, char_faces: dict) -> List[dict]:
-    """
-    Refines script and assigns correct MALE/FEMALE voices.
-    """
     characters = storyboard.get('characters', [])
-    full_script_text = " ".join([s.get('audio_narration', '') for s in storyboard.get('scenes', [])])
-    
-    # Simple list of segments
     segments = []
     
     for scene in storyboard.get("scenes", []):
         text = scene.get("audio_narration", "")
         if not text: continue
         
-        # Determine character in this scene
         char_list = scene.get('characters_in_scene', [])
         char_name = char_list[0] if char_list else "Unknown"
         char_data = char_faces.get(char_name, {})
         
-        # Assign Voice ID
-        assigned_voice = MALE_VOICE_ID # Default to Male
-        
-        if "female" in str(char_data) or "woman" in str(char_data):
+        # Determine Voice Gender
+        assigned_voice = MALE_VOICE_ID 
+        if "female" in str(char_data) or "woman" in str(char_data) or "girl" in str(char_data):
              assigned_voice = FEMALE_VOICE_ID
              
         segments.append({"text": text, "voice_id": assigned_voice})
@@ -584,7 +529,6 @@ def background_generate_video(self, form_data: dict):
     logging.info(f"[{task_id}] SaaS Task started.")
     if not HEYGEN_AVAILABLE:
         logging.error("Task aborted: HeyGen client is not configured.")
-        # Return clean error dict to prevent Worker crash loop
         return {"status": "error", "message": "HeyGen client not available"}
 
     try:
@@ -620,19 +564,41 @@ def background_generate_video(self, form_data: dict):
         uploaded_images = form_data.get("uploaded_images") or []
         character_faces = {}
         
-        # Casting Logic: Round-Robin allocation for different faces
+        # --- NEW CASTING LOGIC: GENDER AWARE ---
         for i, char in enumerate(characters):
              name = char.get("name", "Unknown")
+             prompt = char.get("appearance_prompt", "").lower()
+             
              char_data = ensure_character(name, appearance_prompt=char.get("appearance_prompt"))
              ref_image = next((url for url in uploaded_images if name.lower() in url.lower()), None)
              
-             # Pick different avatar for each character
-             if available_avatars:
-                 selected = available_avatars[i % len(available_avatars)]
-                 char_data["heygen_avatar_id"] = selected.get("avatar_id")
-             else:
-                 char_data["heygen_avatar_id"] = SAFE_FALLBACK_AVATAR_ID
+             # Smart Selection
+             selected_id = SAFE_FALLBACK_AVATAR_ID
              
+             # Is the character male?
+             is_male = "man" in prompt or "male" in prompt or "boy" in prompt or "detective" in prompt
+             is_female = "woman" in prompt or "female" in prompt or "girl" in prompt
+             
+             if available_avatars:
+                 if is_male:
+                     # Filter for Male-sounding names or fallback to Pierce
+                     males = [a for a in available_avatars if any(x in a.get("name","").lower() for x in ["josh", "pierce", "wayne", "fin", "anthony", "michael", "david", "male", "man"])]
+                     if males:
+                         selected_id = random.choice(males).get("avatar_id")
+                     else:
+                         # Force fallback male if no list match
+                         selected_id = BACKUP_MALE_ID
+                 elif is_female:
+                     females = [a for a in available_avatars if any(x in a.get("name","").lower() for x in ["abigail", "sarah", "monica", "amber", "female", "woman"])]
+                     if females:
+                         selected_id = random.choice(females).get("avatar_id")
+                     else:
+                         selected_id = available_avatars[i % len(available_avatars)].get("avatar_id")
+                 else:
+                     # Random rotation
+                     selected_id = available_avatars[i % len(available_avatars)].get("avatar_id")
+             
+             char_data["heygen_avatar_id"] = selected_id
              char_data["reference_image"] = ref_image 
              character_faces[name] = char_data
         
@@ -689,7 +655,7 @@ def background_generate_video(self, form_data: dict):
                     character_faces, 
                     aspect,
                     SAFE_FALLBACK_AVATAR_ID,
-                    asset["background_url"] # Pass generated BG
+                    asset["background_url"] 
                 ): asset
                 for asset in scene_assets
             }
