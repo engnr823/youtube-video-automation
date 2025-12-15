@@ -161,7 +161,8 @@ def generate_heygen_video(
     audio_url: str,
     aspect_ratio: str = "9:16",
     background_image_url: str = None,
-    background_color: str = "#000000"
+    background_color: str = "#000000",
+    use_green_screen: bool = False  # <--- NEW PARAMETER
 ) -> str:
     
     if aspect_ratio == "9:16":
@@ -169,7 +170,11 @@ def generate_heygen_video(
     else:
         dimension = {"width": 1280, "height": 720}
 
-    if background_image_url:
+    # --- LOGIC CHANGE FOR GREEN SCREEN ---
+    if use_green_screen:
+        # Use a bright green for easy chroma keying
+        background = {"type": "color", "value": "#00FF00"}
+    elif background_image_url:
         background = {"type": "image", "url": background_image_url}
     else:
         background = {"type": "color", "value": background_color}
