@@ -30,13 +30,12 @@ from pydantic import BaseModel, ValidationError
 # Celery app import
 from celery_init import celery
 
-# --- REPLICATE REMOVAL (Kept primarily for compatibility) ---
-replicate = None 
-replicate_client = None 
+# --- REPLICATE CLIENT (Added for Flux Images) ---
+import replicate 
 
 from openai import OpenAI
 
-# --- IMPORT OPENAI TTS CLIENT (For Fallback) ---
+# --- IMPORT OPENAI TTS CLIENT (For Audio Fallback) ---
 try:
     from video_clients.openai_client import generate_openai_speech
 except ImportError:
@@ -49,8 +48,6 @@ FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
 # Safe "Lite" Avatar (Josh) that works on almost all plans to avoid 404s
 SAFE_FALLBACK_AVATAR_ID = "josh_lite3_20230714" 
-# Backup Male ID if found in list
-BACKUP_MALE_ID = "daf0aeb75914449980d4407b1e427d14" # Pierce
 
 # --- Utility Fix: Define missing ensure_dir function ---
 def ensure_dir(path):
@@ -238,29 +235,43 @@ def extract_json_list_from_text(text: str) -> Optional[list]:
     return None
 
 # -------------------------
-# Image generation (UPGRADED: DALL-E 3)
+# Image generation (MODIFIED: Uses Flux via Replicate)
 # -------------------------
 def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str = "") -> str:
-    if openai_client:
-        try:
-            logging.info(f"🎨 Generating background with DALL-E 3: {prompt[:30]}...")
-            size = "1024x1792" if aspect == "9:16" else "1024x1024"
-            response = openai_client.images.generate(
-                model="dall-e-3",
-                prompt=f"Cinematic movie scene, {prompt}, photorealistic, 8k, highly detailed background, no text, atmospheric lighting",
-                size=size,
-                quality="standard",
-                n=1,
-            )
-            image_url = response.data[0].url
-            logging.info("✅ Background generated successfully.")
-            return image_url
-        except Exception as e:
-            logging.warning(f"DALL-E generation failed: {e}")
+    """
+    Generates a background image using Flux-Schnell (Replicate) for low cost.
+    Replaces the previous DALL-E 3 implementation.
+    """
+    try:
+        logging.info(f"🎨 Generating background with Flux (Replicate): {prompt[:30]}...")
+        
+        # Ensure aspect ratio is supported by Flux (16:9, 9:16, 1:1, etc.)
+        if aspect not in ["16:9", "9:16", "1:1", "4:5", "2:3", "3:2"]:
+            aspect = "16:9" # fallback
 
+        # Call Flux-Schnell (Very fast & cheap)
+        output = replicate.run(
+            "black-forest-labs/flux-schnell",
+            input={
+                "prompt": prompt + ", cinematic lighting, 8k, hyper-detailed, photorealistic, no text, bokeh background",
+                "aspect_ratio": aspect,
+                "output_format": "jpg",
+                "output_quality": 90
+            }
+        )
+        
+        # Replicate usually returns a list of output URLs/objects
+        if output:
+            # Flux-Schnell returns a list of FileOutput objects or strings
+            image_url = str(output[0])
+            logging.info("✅ Background generated successfully (Flux).")
+            return image_url
+            
+    except Exception as e:
+        logging.error(f"Flux generation failed: {e}")
+
+    # Fallback to DALL-E if Flux fails (optional safety net) or Placeholder
     logging.warning("⚠️ Using placeholder image.")
-    if 'old man' in prompt.lower() or 'mentor' in prompt.lower():
-        return "https://placeimg.com/480/832/people" 
     return "https://placeimg.com/480/832/abstract"
 
 
@@ -314,7 +325,7 @@ def process_single_scene(
              return {"index": index, "video_path": None, "status": "skipped"}
 
         # --- 3. BACKGROUND HANDLING (Composite Flow) ---
-        bg_image_local_path = os.path.join(temp_dir, f"bg_{index}.png")
+        bg_image_local_path = os.path.join(temp_dir, f"bg_{index}.jpg")
         if background_url:
             try:
                 download_to_file(background_url, bg_image_local_path)
@@ -571,7 +582,7 @@ def background_generate_video(self, form_data: dict):
         uploaded_images = form_data.get("uploaded_images") or []
         character_faces = {}
         
-        # --- NEW CASTING LOGIC: GENDER AWARE ---
+        # --- NEW CASTING LOGIC: GENDER AWARE + FALLBACK ---
         for i, char in enumerate(characters):
              name = char.get("name", "Unknown")
              prompt = char.get("appearance_prompt", "").lower()
@@ -579,31 +590,30 @@ def background_generate_video(self, form_data: dict):
              char_data = ensure_character(name, appearance_prompt=char.get("appearance_prompt"))
              ref_image = next((url for url in uploaded_images if name.lower() in url.lower()), None)
              
-             # Smart Selection
-             selected_id = SAFE_FALLBACK_AVATAR_ID
+             # Initial selection
+             selected_id = None
              
-             # Is the character male?
              is_male = "man" in prompt or "male" in prompt or "boy" in prompt or "detective" in prompt
              is_female = "woman" in prompt or "female" in prompt or "girl" in prompt
              
              if available_avatars:
                  if is_male:
-                     # Filter for Male-sounding names or fallback to Pierce
+                     # Filter for Male-sounding names
                      males = [a for a in available_avatars if any(x in a.get("name","").lower() for x in ["josh", "pierce", "wayne", "fin", "anthony", "michael", "david", "male", "man"])]
                      if males:
                          selected_id = random.choice(males).get("avatar_id")
-                     else:
-                         # Force fallback male if no list match
-                         selected_id = BACKUP_MALE_ID
                  elif is_female:
                      females = [a for a in available_avatars if any(x in a.get("name","").lower() for x in ["abigail", "sarah", "monica", "amber", "female", "woman"])]
                      if females:
                          selected_id = random.choice(females).get("avatar_id")
-                     else:
-                         selected_id = available_avatars[i % len(available_avatars)].get("avatar_id")
-                 else:
-                     # Random rotation
+                 
+                 # --- CRITICAL FALLBACK: IF NO SPECIFIC MATCH, USE ANY AVATAR ---
+                 if not selected_id:
+                     logging.warning(f"⚠️ No specific match for {name}, picking random avatar from account.")
                      selected_id = available_avatars[i % len(available_avatars)].get("avatar_id")
+             else:
+                 # No avatars in account at all? Use Safe Fallback (might fail if not in acct)
+                 selected_id = SAFE_FALLBACK_AVATAR_ID
              
              char_data["heygen_avatar_id"] = selected_id
              char_data["reference_image"] = ref_image 
