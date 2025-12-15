@@ -582,16 +582,23 @@ def background_generate_video(self, form_data: dict):
         uploaded_images = form_data.get("uploaded_images") or []
         character_faces = {}
         
-        # --- NEW CASTING LOGIC: GENDER AWARE + FALLBACK ---
+        # --- NEW CASTING LOGIC: GENDER AWARE + UPLOADED IMAGE ---
         for i, char in enumerate(characters):
              name = char.get("name", "Unknown")
              prompt = char.get("appearance_prompt", "").lower()
              
              char_data = ensure_character(name, appearance_prompt=char.get("appearance_prompt"))
+             
+             # --- FIX: Match uploaded image to character name ---
+             # Assuming filename or URL contains the character name (case-insensitive)
              ref_image = next((url for url in uploaded_images if name.lower() in url.lower()), None)
              
              # Initial selection
              selected_id = None
+             
+             # If user uploaded an image for this character, prefer using a relevant avatar 
+             # (In a real scenario, you'd create an avatar from this image, but here we pick a fallback or generic)
+             # For now, we will just store the ref_image.
              
              is_male = "man" in prompt or "male" in prompt or "boy" in prompt or "detective" in prompt
              is_female = "woman" in prompt or "female" in prompt or "girl" in prompt
