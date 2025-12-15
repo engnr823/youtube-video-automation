@@ -5,6 +5,7 @@ import logging
 import json
 import re
 import uuid
+from video_clients.openai_client import generate_openai_speech
 import shutil
 import tempfile
 import traceback
@@ -616,14 +617,26 @@ def background_generate_video(self, form_data: dict):
             voice_id = segments[i].get("voice_id") if i < len(segments) else MALE_VOICE_ID
             full_script_text += text + " "
             
-            # A. Generate Audio
-            audio_path = None
-            if generate_audio_for_scene:
-                try: 
-                    audio_res = generate_audio_for_scene(text, voice_id)
-                    audio_path = audio_res.get("path") if audio_res else None
-                except Exception as e:
-                    logging.error(f"Audio error scene {i}: {e}")
+            
+           # A. Generate Audio (OpenAI Fallback)
+audio_path = None
+try:
+    # Try ElevenLabs first
+    if generate_audio_for_scene:
+        audio_res = generate_audio_for_scene(text, voice_id)
+        audio_path = audio_res.get("path") if audio_res else None
+except Exception:
+    pass
+
+# If ElevenLabs fails (quota exceeded) or is missing, use OpenAI
+if not audio_path:
+    logging.info(f"⚠️ ElevenLabs failed/quota exceeded. Switching to OpenAI TTS for scene {i}")
+    try:
+        # Map gender to OpenAI voices
+        voice_preset = "onyx" if voice_id == MALE_VOICE_ID else "nova"
+        audio_path = generate_openai_speech(text, voice_category=voice_preset)
+    except Exception as e:
+         logging.error(f"OpenAI TTS also failed: {e}")
             
             # B. Generate Background
             visual_prompt = scene.get("visual_prompt", "Background")
