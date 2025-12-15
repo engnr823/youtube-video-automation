@@ -57,9 +57,9 @@ except Exception:
     VoiceSettings = None
     logging.warning("⚠️ ElevenLabs VoiceSettings not found. Using default voice stability.")
 
-# --- UTILS IMPORT SAFETY BLOCK ---
+# --- UTILS IMPORT SAFETY BLOCK (Updated for Composite) ---
 try:
-    from utils.ffmpeg_utils import get_media_duration
+    from utils.ffmpeg_utils import get_media_duration, composite_green_screen_scene
 except Exception:
     def get_media_duration(file_path):
         # Fallback implementation
@@ -75,6 +75,10 @@ except Exception:
         except Exception as e:
             logging.error(f"Error getting duration for {file_path}: {e}")
             return 0.0
+            
+    def composite_green_screen_scene(bg, fg, out):
+        logging.error("composite_green_screen_scene function missing.")
+        return False
 
 # --- CLIENT IMPORT SAFETY BLOCK (ELEVENLABS) ---
 try:
@@ -275,7 +279,7 @@ def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str 
 
 
 # -------------------------
-# Single scene processor (FIXED: BACKGROUNDS + NO PREMATURE DELETE)
+# Single scene processor (UPDATED: COMPOSITING WORKFLOW)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -323,32 +327,64 @@ def process_single_scene(
              logging.warning(f"Scene {index} skipped as required audio/avatar is missing.")
              return {"index": index, "video_path": None, "status": "skipped"}
 
-        # 3. Call the single HeyGen API function
-        # PASS THE BACKGROUND URL HERE to fix "No Scenes"
-        logging.info(f"Calling HeyGen for Scene {index} (Avatar: {avatar_id}, BG: {'Yes' if background_url else 'No'})")
+        # --- 3. BACKGROUND HANDLING (Composite Flow) ---
+        bg_image_local_path = os.path.join(temp_dir, f"bg_{index}.png")
+        if background_url:
+            try:
+                download_to_file(background_url, bg_image_local_path)
+            except Exception as e:
+                logging.warning(f"Failed to download background for scene {index}: {e}")
+        else:
+            logging.warning(f"No background URL provided for scene {index}")
+
+        # --- 4. HEYGEN GENERATION (GREEN SCREEN) ---
+        logging.info(f"Calling HeyGen for Green Screen Scene {index} (Avatar: {avatar_id})")
         
+        # NOTE: video_clients/heygen_client.py must be updated to support use_green_screen
         video_url = generate_heygen_video(
             avatar_id=avatar_id,
             audio_url=cloud_audio_url,
             aspect_ratio=aspect, 
-            background_image_url=background_url # Pass the DALL-E image
+            background_image_url=None, # DO NOT pass background to HeyGen
+            use_green_screen=True      # REQUEST Green Screen
         )
 
         if not video_url:
             raise RuntimeError("Video generation failed via HeyGen")
 
-        # 4. Download and return
-        temp_video_path = os.path.join(temp_dir, f"scene_gen_{index}.mp4")
-        download_to_file(str(video_url), temp_video_path, timeout=300)
+        # 5. Download Green Screen Video
+        green_screen_path = os.path.join(temp_dir, f"green_raw_{index}.mp4")
+        download_to_file(str(video_url), green_screen_path, timeout=300)
 
+        # 6. COMPOSITE (Flux BG + Green Screen Actor + Camera Move)
+        final_scene_path = os.path.join(temp_dir, f"scene_gen_{index}.mp4")
+        
+        composite_success = False
+        if os.path.exists(bg_image_local_path) and os.path.exists(green_screen_path):
+            logging.info(f"Compositing scene {index} with camera movement...")
+            try:
+                composite_success = composite_green_screen_scene(
+                    bg_image_local_path, 
+                    green_screen_path, 
+                    final_scene_path
+                )
+            except Exception as e:
+                logging.error(f"Composite crashed scene {index}: {e}")
+
+        # Fallback if composite failed or no BG: use raw green screen (or ideally a black bg fallback)
+        if not composite_success:
+            logging.warning(f"Composite failed for scene {index}, using raw video.")
+            if os.path.exists(green_screen_path):
+                shutil.copy(green_screen_path, final_scene_path)
+        
         # CRITICAL: Verify file exists
-        if not os.path.exists(temp_video_path):
-             logging.error(f"Scene {index} reported success but file is missing at {temp_video_path}")
+        if not os.path.exists(final_scene_path):
+             logging.error(f"Scene {index} reported success but file is missing at {final_scene_path}")
              return {"index": index, "video_path": None, "status": "failed"}
 
         # CRITICAL: DO NOT DELETE TEMP DIR HERE. It is needed for stitching.
         
-        return {"index": index, "video_path": temp_video_path, "status": "success"}
+        return {"index": index, "video_path": final_scene_path, "status": "success"}
 
     except Exception as e:
         logging.error(f"Scene {index} failed: {traceback.format_exc()}")
