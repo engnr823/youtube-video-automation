@@ -5,7 +5,6 @@ import logging
 import json
 import re
 import uuid
-from video_clients.openai_client import generate_openai_speech
 import shutil
 import tempfile
 import traceback
@@ -36,6 +35,13 @@ replicate = None
 replicate_client = None 
 
 from openai import OpenAI
+
+# --- IMPORT OPENAI TTS CLIENT (For Fallback) ---
+try:
+    from video_clients.openai_client import generate_openai_speech
+except ImportError:
+    generate_openai_speech = None
+    logging.warning("⚠️ OpenAI TTS client not found. Fallback will not work.")
 
 # --- CONSTANTS FOR VOICES AND AVATARS ---
 MALE_VOICE_ID = "ErXwobaYiN019PkySvjV" 
@@ -617,26 +623,29 @@ def background_generate_video(self, form_data: dict):
             voice_id = segments[i].get("voice_id") if i < len(segments) else MALE_VOICE_ID
             full_script_text += text + " "
             
+            # --- AUDIO GENERATION (WITH OPENAI FALLBACK) ---
+            audio_path = None
             
-           # A. Generate Audio (OpenAI Fallback)
-audio_path = None
-try:
-    # Try ElevenLabs first
-    if generate_audio_for_scene:
-        audio_res = generate_audio_for_scene(text, voice_id)
-        audio_path = audio_res.get("path") if audio_res else None
-except Exception:
-    pass
+            # Try ElevenLabs first
+            try:
+                if generate_audio_for_scene:
+                    audio_res = generate_audio_for_scene(text, voice_id)
+                    audio_path = audio_res.get("path") if audio_res else None
+            except Exception as e:
+                logging.warning(f"ElevenLabs error scene {i}: {e}")
 
-# If ElevenLabs fails (quota exceeded) or is missing, use OpenAI
-if not audio_path:
-    logging.info(f"⚠️ ElevenLabs failed/quota exceeded. Switching to OpenAI TTS for scene {i}")
-    try:
-        # Map gender to OpenAI voices
-        voice_preset = "onyx" if voice_id == MALE_VOICE_ID else "nova"
-        audio_path = generate_openai_speech(text, voice_category=voice_preset)
-    except Exception as e:
-         logging.error(f"OpenAI TTS also failed: {e}")
+            # Fallback to OpenAI TTS if ElevenLabs failed or returned nothing
+            if not audio_path:
+                logging.info(f"⚠️ Switching to OpenAI TTS for scene {i} due to ElevenLabs failure/quota.")
+                try:
+                    if generate_openai_speech:
+                        # Simple gender mapping for OpenAI voices
+                        voice_preset = "onyx" if voice_id == MALE_VOICE_ID else "nova"
+                        audio_path = generate_openai_speech(text, voice_category=voice_preset)
+                    else:
+                        logging.error("OpenAI TTS client not available for fallback.")
+                except Exception as e:
+                    logging.error(f"OpenAI TTS fallback failed: {e}")
             
             # B. Generate Background
             visual_prompt = scene.get("visual_prompt", "Background")
