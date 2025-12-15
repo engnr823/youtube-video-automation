@@ -48,7 +48,7 @@ def process_and_stitch_scenes(scene_pairs: List[Tuple[str, str]], temp_visual_pa
             audio_dur = get_media_duration(audio)
             if audio_dur == 0: continue
 
-            # Command: Use fast preset and CRF 23 for better quality than the original code
+            # Command: Use fast preset and CRF 23 for better quality
             cmd = [
                 "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
                 "-t", str(audio_dur),
@@ -90,7 +90,54 @@ def process_and_stitch_scenes(scene_pairs: List[Tuple[str, str]], temp_visual_pa
             shutil.rmtree(temp_dir)
             logging.info(f"Cleaned up temp dir: {temp_dir}")
 
-# --- CRITICAL FUNCTION FOR FINAL MIXING ---
+
+def composite_green_screen_scene(
+    background_image_path: str,
+    green_screen_video_path: str,
+    output_path: str
+) -> bool:
+    """
+    Composites a Green Screen video (HeyGen) over a Static Background (Flux/DALL-E).
+    Adds a subtle 'Zoom In' effect to the background to make it feel cinematic.
+    """
+    try:
+        if not os.path.exists(background_image_path) or not os.path.exists(green_screen_video_path):
+            logging.error("Missing input files for composite.")
+            return False
+
+        # Get duration of the video to match the background length
+        duration = get_media_duration(green_screen_video_path)
+        if duration <= 0: duration = 5.0
+
+        # FFmpeg Filter Explanation:
+        # 1. [0:v] zoompan: Zooms into the image slowly over 25fps * duration.
+        # 2. [1:v] colorkey: Removes the #00FF00 green color.
+        # 3. overlay: Puts the actor on top of the zoomed background.
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", background_image_path,  # Input 0: Background
+            "-i", green_screen_video_path,             # Input 1: Actor
+            "-filter_complex",
+            f"[0:v]scale=8000:-1,zoompan=z='min(zoom+0.0015,1.5)':d={int(duration*25)+100}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920[bg];"
+            "[1:v]colorkey=0x00FF00:0.1:0.1[actor];"
+            "[bg][actor]overlay=(W-w)/2:(H-h):shortest=1",
+            "-t", str(duration),
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast",
+            "-c:a", "copy",
+            output_path
+        ]
+        
+        subprocess.run(cmd, check=True, capture_output=True)
+        return os.path.exists(output_path)
+
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Composite failed: {e.stderr.decode() if e.stderr else e}")
+        return False
+    except Exception as e:
+        logging.error(f"General composite error: {e}")
+        return False
+
 
 def mix_music_and_finalize(temp_visual_path: str, music_path: str, final_output_path: str) -> bool:
     """
