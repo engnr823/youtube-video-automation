@@ -10,7 +10,7 @@
 
     <style>
         :root {
-            --primary-color: #2563eb; /* Royal Blue for "Pro" feel */
+            --primary-color: #2563eb;
             --background-color: #f1f5f9;
             --form-background: #ffffff;
             --text-color: #0f172a;
@@ -71,8 +71,9 @@
         #resultArea { display: none; margin-top: 40px; animation: slideUp 0.5s ease-out; }
         @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 
-        .video-container { position: relative; border-radius: 16px; overflow: hidden; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); background: #000; aspect-ratio: 9/16; max-width: 400px; margin: 0 auto 2rem auto; }
-        video { width: 100%; height: 100%; object-fit: cover; }
+        .video-container { position: relative; border-radius: 16px; overflow: hidden; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); background: #000; max-width: 400px; margin: 0 auto 2rem auto; }
+        /* Dynamic aspect ratio will be handled by JS or simple css max-height */
+        video { width: 100%; display: block; }
 
         .metadata-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
         .metadata-title { font-weight: 700; color: var(--primary-color); margin-bottom: 1rem; display: flex; align-items: center; gap: 8px; }
@@ -90,6 +91,7 @@
         <p class="subtitle">Repurpose • Edit • Caption • Polish</p>
 
         <form id="editorForm" enctype="multipart/form-data">
+            
             <fieldset>
                 <legend><i class="bi bi-cloud-upload"></i> Source Material</legend>
                 
@@ -110,6 +112,17 @@
             </fieldset>
 
             <fieldset>
+                <legend><i class="bi bi-aspect-ratio"></i> Output Format</legend>
+                <div class="mb-3">
+                    <label class="form-label">Target Platform</label>
+                    <select class="form-select" name="output_format" id="formatSelect">
+                        <option value="9:16" selected>📱 Viral Short (9:16) - TikTok, Reels, YouTube Shorts</option>
+                        <option value="16:9">📺 Long Video (16:9) - YouTube Standard, Facebook</option>
+                    </select>
+                </div>
+            </fieldset>
+
+            <fieldset>
                 <legend><i class="bi bi-scissors"></i> Smart Editing Suite</legend>
                 
                 <div class="toggle-switch">
@@ -122,10 +135,10 @@
                     </div>
                 </div>
 
-                <div class="toggle-switch">
+                <div class="toggle-switch" id="blurOptionContainer">
                     <div>
                         <span class="toggle-label">Blur Header/Footer</span>
-                        <span class="toggle-desc">Hide TikTok/Reels UI and Watermarks (Top 15%, Bottom 20%).</span>
+                        <span class="toggle-desc">Hide TikTok/Reels UI and Watermarks (Bottom 15%).</span>
                     </div>
                     <div class="form-check form-switch">
                         <input class="form-check-input" type="checkbox" name="blur_watermarks" value="true" checked>
@@ -135,7 +148,7 @@
                 <div class="toggle-switch">
                     <div>
                         <span class="toggle-label">Auto-Captions (Burn-in)</span>
-                        <span class="toggle-desc">Generate and burn professional subtitles (Arial, White).</span>
+                        <span class="toggle-desc">Generate and burn professional subtitles (Yellow/Black).</span>
                     </div>
                     <div class="form-check form-switch">
                         <input class="form-check-input" type="checkbox" name="add_subtitles" value="true" checked>
@@ -219,11 +232,26 @@
 
     <script>
         const form = document.getElementById("editorForm");
+        const formatSelect = document.getElementById("formatSelect");
+        const blurOptionContainer = document.getElementById("blurOptionContainer");
         const statusArea = document.getElementById("statusArea");
         const statusTitle = document.getElementById("statusTitle");
         const statusText = document.getElementById("statusText");
         const resultArea = document.getElementById("resultArea");
         const btn = document.getElementById("submitBtn");
+
+        // UI Logic: Hide "Blur Header/Footer" if format is 16:9 (Not needed for long videos)
+        formatSelect.addEventListener('change', function() {
+            if (this.value === '16:9') {
+                blurOptionContainer.style.opacity = '0.5';
+                blurOptionContainer.style.pointerEvents = 'none';
+                blurOptionContainer.querySelector('input').checked = false;
+            } else {
+                blurOptionContainer.style.opacity = '1';
+                blurOptionContainer.style.pointerEvents = 'auto';
+                blurOptionContainer.querySelector('input').checked = true;
+            }
+        });
 
         form.onsubmit = async (e) => {
             e.preventDefault();
@@ -274,13 +302,12 @@
                         clearInterval(interval);
                         showError(data.message);
                     } else {
-                        // Update status text
-                        statusTitle.innerText = "Processing...";
-                        statusText.innerText = data.message || "Applying AI magic...";
+                        statusTitle.innerText = "AI Editor at Work";
+                        statusText.innerText = data.message || "Processing video frames...";
                     }
                 } catch (e) {
                     clearInterval(interval);
-                    showError("Connection lost. Please refresh.");
+                    showError("Lost connection to server.");
                 }
             }, 3000);
         }
