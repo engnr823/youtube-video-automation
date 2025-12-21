@@ -89,10 +89,10 @@ except Exception:
 
 # --- CRITICAL FIX: ROBUST HEYGEN CLIENT IMPORT ---
 try:
+    # REMOVED 'get_safe_fallback_id' to fix the import error
     from video_clients.heygen_client import (
         generate_heygen_video, 
         get_all_avatars, 
-        get_safe_fallback_id, 
         HeyGenError
     )
     HEYGEN_AVAILABLE = True
@@ -100,7 +100,6 @@ except ImportError as e:
     logging.error(f"❌ HEYGEN CLIENT NOT FOUND. Video generation will fail. IMPORT ERROR: {e}")
     generate_heygen_video = None
     get_all_avatars = None
-    get_safe_fallback_id = lambda: SAFE_FALLBACK_AVATAR_ID
     HEYGEN_AVAILABLE = False
 
 
@@ -795,26 +794,36 @@ def background_generate_video(self, form_data: dict):
         # Audio Mix (Background Music)
         if music_path and os.path.exists(music_path):
             mixed_output_path = final_output_path.replace(".mp4", "_mixed.mp4")
+            # FFmpeg Command: Loop music (-stream_loop -1), Mix with volume filter, Re-encode fast
             cmd = [
                 "ffmpeg", "-y", "-i", temp_visual_path, "-stream_loop", "-1", "-i", music_path,
                 "-filter_complex", 
-                # Mix voice (100%) with music (15%)
-                "[0:a]volume=1.0[v];[1:a]volume=0.15[m];[v][m]amix=inputs=2:duration=first",
-                "-map", "0:v", "-map", "[outa]", # Note: filter output needs label [outa] or implicit use
-                # Adjusted filter complex for correct mapping
-                "-filter_complex", "[0:a]volume=1.0[v];[1:a]volume=0.15[m];[v][m]amix=inputs=2:duration=first[aout]",
+                # [0:a] is voice (100% vol), [1:a] is music (15% vol)
+                "[0:a]volume=1.0[v];[1:a]volume=0.15[m];[v][m]amix=inputs=2:duration=first[aout]",
                 "-map", "0:v", "-map", "[aout]",
-                "-c:v", "copy", # Copy video stream to save time (stitching already re-encoded if needed)
-                "-c:a", "aac", "-shortest", final_output_path
+                "-c:v", "libx264", "-preset", "ultrafast", # Re-encode video lightly to ensure sync
+                "-c:a", "aac", "-shortest", final_output_path # Overwrite final output directly
             ]
-            # Use a slightly different command to ensure stability with 'copy'
+            # We use a temp name for safety then move
             subprocess.run([
                 "ffmpeg", "-y", "-i", temp_visual_path, "-stream_loop", "-1", "-i", music_path,
                 "-filter_complex", "[0:a]volume=1.0[v];[1:a]volume=0.15[m];[v][m]amix=inputs=2:duration=first[aout]",
                 "-map", "0:v", "-map", "[aout]",
-                "-c:v", "libx264", "-preset", "ultrafast", # Re-encode fast to ensure audio sync
-                "-c:a", "aac", "-shortest", final_output_path
-            ], check=True)
+                "-c:v", "copy", # Try copy first for speed (if audio codec matches)
+                "-c:a", "aac", "-shortest", mixed_output_path
+            ], check=False)
+            
+            # If copy failed (likely), force re-encode
+            if not os.path.exists(mixed_output_path):
+                 subprocess.run([
+                    "ffmpeg", "-y", "-i", temp_visual_path, "-stream_loop", "-1", "-i", music_path,
+                    "-filter_complex", "[0:a]volume=1.0[v];[1:a]volume=0.15[m];[v][m]amix=inputs=2:duration=first[aout]",
+                    "-map", "0:v", "-map", "[aout]",
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac", "-shortest", mixed_output_path
+                ], check=True)
+            
+            shutil.move(mixed_output_path, final_output_path)
         else:
             shutil.move(temp_visual_path, final_output_path)
         
