@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import requests
 import math
+import traceback  # <--- FIXED: Added missing import
+import re         # <--- Added for Google Drive ID extraction
 from pathlib import Path
 from datetime import timedelta
 
@@ -38,11 +40,28 @@ if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.
 # 🛠️ HELPER FUNCTIONS
 # -------------------------------------------------------------------------
 
+def transform_drive_url(url):
+    """Converts a Google Drive 'View' link to a 'Direct Download' link."""
+    if "drive.google.com" in url and "/file/d/" in url:
+        try:
+            file_id = re.search(r'/file/d/([a-zA-Z0-9_-]+)', url).group(1)
+            return f"https://drive.google.com/uc?export=download&id={file_id}"
+        except AttributeError:
+            return url
+    return url
+
 def download_file(url, dest_path):
     """Downloads video from any public link (Cloudinary, Drive, S3)."""
-    logging.info(f"⬇️ Downloading: {url}")
+    # Fix Google Drive Links automatically
+    download_url = transform_drive_url(url)
+    
+    logging.info(f"⬇️ Downloading: {download_url}")
     try:
-        with requests.get(url, stream=True, timeout=120) as r:
+        with requests.get(download_url, stream=True, timeout=120) as r:
+            # Check for 403/401 errors specifically
+            if r.status_code == 403 or r.status_code == 401:
+                raise RuntimeError("⛔ Access Denied. Please make sure the Google Drive link is set to 'Anyone with the link'.")
+            
             r.raise_for_status()
             with open(dest_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
@@ -80,12 +99,6 @@ def crop_to_vertical(input_path, output_path):
     This effectively REMOVES side watermarks (like Veo) automatically.
     """
     logging.info("📐 Auto-Cropping to Vertical (9:16)...")
-    
-    # Calculate crop parameters
-    # Target: 1080x1920
-    # Logic: scaling height to 1920, then cropping width to 1080 (center)
-    # Filter: scale=-1:1920,crop=1080:1920
-    
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
         "-vf", "scale=-1:1920,crop=1080:1920:((iw-1080)/2):0,setsar=1",
@@ -101,11 +114,9 @@ def crop_to_vertical(input_path, output_path):
 def remove_silence(input_path, output_path, db_threshold=-30, min_silence_duration=0.6):
     logging.info("✂️ Processing Jump Cuts...")
     
-    # 1. Detect
     cmd = ["ffmpeg", "-i", input_path, "-af", f"silencedetect=noise={db_threshold}dB:d={min_silence_duration}", "-f", "null", "-"]
     result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
     
-    # 2. Parse
     silence_starts = []
     silence_ends = []
     for line in result.stderr.splitlines():
@@ -119,7 +130,6 @@ def remove_silence(input_path, output_path, db_threshold=-30, min_silence_durati
         shutil.copy(input_path, output_path)
         return
 
-    # 3. Build Filter
     duration, _, _ = get_video_info(input_path)
     filter_complex = ""
     concat_idx = 0
@@ -173,21 +183,13 @@ def generate_subtitles(audio_path):
 def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True):
     logging.info("✨ Applying Final Polish (Blur + Subs)...")
     
-    # 1. Subtitles Style (Yellow, Bold, Bottom Center)
-    # Alignment=2 (Bottom Center), MarginV=50 (Lifted up)
     style = "Alignment=2,MarginV=50,Fontname=Arial,FontSize=24,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=3,Outline=2,Shadow=0,Bold=1"
-    
-    # Windows/Linux path escaping for FFmpeg
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     
     filters = []
-    
-    # 2. Blur Logic (Optional)
-    # If 9:16 video, blur top 150px and bottom 150px
     if blur_watermarks:
         filters.append("boxblur=luma_radius=20:luma_power=1:enable='between(y,0,150)+between(y,h-200,h)'")
         
-    # 3. Add Subtitles
     if os.path.exists(srt_path):
         filters.append(f"subtitles='{safe_srt}':force_style='{style}'")
         
@@ -204,7 +206,6 @@ def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True):
 def generate_packaging(transcript_text, duration):
     logging.info("📦 Generating Viral Packaging...")
     
-    # 1. Metadata
     prompt = f"""
     Analyze this video transcript: "{transcript_text[:1000]}..."
     Generate:
@@ -220,7 +221,6 @@ def generate_packaging(transcript_text, duration):
     )
     meta = json.loads(res.choices[0].message.content)
     
-    # 2. Thumbnail
     logging.info(f"🎨 Generating Thumbnail: {meta.get('thumbnail_prompt')[:30]}...")
     try:
         output = replicate.run(
@@ -255,6 +255,7 @@ def process_video_upload(self, form_data: dict):
         
         # 1. Ingest
         update("Downloading Video...")
+        # Note: download_file now handles Google Drive conversion internally
         download_file(form_data['video_url'], raw_path)
         
         # Check Source Aspect Ratio
@@ -264,14 +265,12 @@ def process_video_upload(self, form_data: dict):
         current_video = raw_path
         
         # 2. Smart Crop (Landscape -> Portrait)
-        # Only crop if it's landscape AND user didn't disable it
         if is_landscape:
             update("Converting to Vertical (9:16)...")
             crop_to_vertical(raw_path, cropped_path)
             current_video = cropped_path
         
         # 3. Silence Removal
-        # Skip for "Drama" videos (like your specific example)
         if form_data.get('remove_silence') == 'true':
             update("Removing Silence...")
             remove_silence(current_video, cut_path)
@@ -280,7 +279,6 @@ def process_video_upload(self, form_data: dict):
         # 4. Transcription
         if form_data.get('add_subtitles') == 'true':
             update("Generating Subtitles...")
-            # Extract Audio
             subprocess.run(["ffmpeg", "-y", "-i", current_video, "-q:a", "0", "-map", "a", audio_path], check=True)
             srt_content, transcript_text = generate_subtitles(audio_path)
             with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
@@ -313,7 +311,10 @@ def process_video_upload(self, form_data: dict):
         }
 
     except Exception as e:
-        logging.error(traceback.format_exc())
-        return {"status": "error", "message": str(e)}
+        error_msg = f"Workflow failed: {str(e)}"
+        # FIXED: traceback is now imported, so this won't crash
+        logging.error(f"Task Exception: {traceback.format_exc()}")
+        self.update_state(state="FAILURE", meta={"error": error_msg})
+        return {"status": "error", "message": error_msg}
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
