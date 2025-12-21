@@ -3,17 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI YouTube Video Suite 2.0</title>
+    <title>AI Viral Video Editor | Repurpose Engine</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
 
     <style>
         :root {
-            --primary-color: #4f46e5;
-            --background-color: #f8fafc;
+            --primary-color: #2563eb; /* Royal Blue for "Pro" feel */
+            --background-color: #f1f5f9;
             --form-background: #ffffff;
-            --text-color: #1e293b;
-            --border-color: #cbd5e1;
+            --text-color: #0f172a;
+            --border-color: #e2e8f0;
         }
         body {
             font-family: 'Inter', sans-serif;
@@ -24,175 +25,217 @@
         .main-container {
             background: var(--form-background);
             padding: 2.5rem;
-            border-radius: 16px;
-            box-shadow: 0 10px 40px rgba(79, 70, 229, 0.1);
+            border-radius: 20px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
             border: 1px solid var(--border-color);
-            max-width: 900px;
+            max-width: 850px;
             margin: 0 auto;
         }
-        h1 { color: var(--primary-color); font-weight: 700; text-align: center; margin-bottom: 1rem; }
-        fieldset { border: 1px solid var(--border-color); padding: 1.5rem; border-radius: 10px; margin-bottom: 1.5rem; background: #fff; }
-        legend { font-weight: 600; color: var(--primary-color); padding: 0 10px; width: auto; }
+        h1 { color: var(--text-color); font-weight: 800; text-align: center; letter-spacing: -0.025em; margin-bottom: 0.5rem; }
+        .subtitle { text-align: center; color: #64748b; font-weight: 500; margin-bottom: 2.5rem; }
+        
+        fieldset { border: 1px solid var(--border-color); padding: 1.5rem; border-radius: 12px; margin-bottom: 1.5rem; background: #f8fafc; transition: all 0.2s; }
+        fieldset:hover { border-color: #cbd5e1; background: #fff; }
+        legend { font-weight: 700; color: var(--primary-color); font-size: 1.1rem; padding: 0 10px; width: auto; float: none; }
+
+        .form-label { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.5rem; color: #334155; }
+        .form-control, .form-select { padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 0.95rem; }
+        .form-control:focus, .form-select:focus { border-color: var(--primary-color); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+
+        .toggle-switch { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #e2e8f0; }
+        .toggle-switch:last-child { border-bottom: none; }
+        .toggle-label { font-weight: 500; font-size: 0.95rem; }
+        .toggle-desc { font-size: 0.8rem; color: #64748b; display: block; }
 
         .btn-primary {
-            background-image: linear-gradient(to right, #4f46e5, #6d28d9);
+            background-color: var(--primary-color);
+            background-image: linear-gradient(to bottom right, #2563eb, #1d4ed8);
             border: none;
-            padding: 12px;
-            font-weight: 600;
+            padding: 16px;
+            font-weight: 700;
             width: 100%;
+            font-size: 1.1rem;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2);
+            transition: transform 0.1s, box-shadow 0.1s;
         }
+        .btn-primary:hover { box-shadow: 0 10px 15px -3px rgba(37, 99, 235, 0.3); transform: translateY(-1px); }
+        .btn-primary:active { transform: scale(0.98); }
+        .btn-primary:disabled { opacity: 0.7; cursor: not-allowed; }
 
-        #statusArea { display: none; text-align: center; margin-top: 20px; padding: 20px; border-radius: 8px; background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; }
-        .loader { display: inline-block; width: 1.5rem; height: 1.5rem; border: 3px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 0.75s linear infinite; margin-right: 10px; }
-        @keyframes spin { 100% { transform: rotate(360deg); } }
+        /* Status & Results */
+        #statusArea { display: none; text-align: center; margin-top: 30px; padding: 30px; border-radius: 12px; background: #eff6ff; color: #1e40af; border: 1px solid #dbeafe; }
+        .loader { width: 48px; height: 48px; border: 5px solid #3b82f6; border-bottom-color: transparent; border-radius: 50%; display: inline-block; box-sizing: border-box; animation: rotation 1s linear infinite; margin-bottom: 15px; }
+        @keyframes rotation { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 
-        #resultArea { display: none; margin-top: 40px; animation: fadeIn 0.5s ease-in; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        #resultArea { display: none; margin-top: 40px; animation: slideUp 0.5s ease-out; }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 
-        .video-wrapper { position: relative; width: 100%; background: #000; border-radius: 12px; overflow: hidden; margin-bottom: 20px; }
-        video { width: 100%; display: block; }
+        .video-container { position: relative; border-radius: 16px; overflow: hidden; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); background: #000; aspect-ratio: 9/16; max-width: 400px; margin: 0 auto 2rem auto; }
+        video { width: 100%; height: 100%; object-fit: cover; }
 
-        .metadata-box { background: #f1f5f9; padding: 20px; border-radius: 10px; border: 1px solid var(--border-color); }
-        .tag { display: inline-block; background: #e0e7ff; color: #4338ca; padding: 4px 10px; border-radius: 15px; font-size: 0.85rem; margin: 4px; font-weight: 500; }
+        .metadata-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
+        .metadata-title { font-weight: 700; color: var(--primary-color); margin-bottom: 1rem; display: flex; align-items: center; gap: 8px; }
+        .tag-cloud { display: flex; flex-wrap: wrap; gap: 8px; }
+        .tag { background: #e0e7ff; color: #3730a3; padding: 4px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; }
+        
+        .thumb-preview { width: 100%; border-radius: 12px; border: 1px solid #cbd5e1; transition: transform 0.2s; }
+        .thumb-preview:hover { transform: scale(1.02); }
     </style>
 </head>
 
 <body>
     <div class="main-container">
-        <h1>AI Short Film Generator</h1>
-        <p class="text-center text-muted mb-4">Scripting • Voiceover • Visuals • Editing</p>
+        <h1>AI Viral Video Editor</h1>
+        <p class="subtitle">Repurpose • Edit • Caption • Polish</p>
 
-        <form id="generateForm">
+        <form id="editorForm">
             <fieldset>
-                <legend>🎬 Core Concept</legend>
-                <label class="form-label">Primary Keyword / Story Topic</label>
-                <input type="text" class="form-control" name="keyword" 
-                       placeholder="e.g. Cinematic life lesson about patience" required>
+                <legend><i class="bi bi-cloud-upload"></i> Source Material</legend>
+                <div class="mb-3">
+                    <label class="form-label">Raw Video Link</label>
+                    <input type="url" class="form-control" name="video_url" 
+                           placeholder="https://files.drive.google.com/..." required>
+                    <div class="form-text text-muted">Direct link to mp4 (Google Drive, Dropbox, etc.)</div>
+                </div>
             </fieldset>
 
             <fieldset>
-                <legend>🎞 Video Settings</legend>
-                <div class="row g-3">
-                    <div class="col-md-6">
-                        <label class="form-label">Aspect Ratio</label>
-                        <select class="form-select" name="video_type">
-                            <option value="reel">Mobile Reel (9:16)</option>
-                            <option value="youtube">YouTube (16:9)</option>
-                        </select>
+                <legend><i class="bi bi-scissors"></i> Smart Editing Suite</legend>
+                
+                <div class="toggle-switch">
+                    <div>
+                        <span class="toggle-label">Remove Silence (Jump Cuts)</span>
+                        <span class="toggle-desc">Automatically remove awkward pauses & silent parts.</span>
                     </div>
-
-                    <div class="col-md-6">
-                        <label class="form-label">Language</label>
-                        <select class="form-select" name="language">
-                            <option value="english">English</option>
-                            <option value="urdu">Roman Urdu</option>
-                            <option value="hindi">Hindi</option>
-                        </select>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" name="remove_silence" value="true" checked>
                     </div>
+                </div>
 
-                    <div class="col-md-6">
-                        <label class="form-label">Competitor Analysis</label>
-                        <select class="form-select" name="scrape_provider">
-                            <option value="none">AI Only</option>
-                            <option value="scrapingbee">ScrapingBee</option>
-                        </select>
+                <div class="toggle-switch">
+                    <div>
+                        <span class="toggle-label">Blur Header/Footer</span>
+                        <span class="toggle-desc">Hide TikTok/Reels UI and Watermarks (Top 15%, Bottom 20%).</span>
                     </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" name="blur_watermarks" value="true" checked>
+                    </div>
+                </div>
 
-                    <div class="col-md-6">
-                        <label class="form-label">Length (Scenes)</label>
-                        <input type="number" class="form-control" name="max_scenes" value="10" min="3" max="60">
+                <div class="toggle-switch">
+                    <div>
+                        <span class="toggle-label">Auto-Captions (Burn-in)</span>
+                        <span class="toggle-desc">Generate and burn professional subtitles (Arial, White).</span>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" name="add_subtitles" value="true" checked>
                     </div>
                 </div>
             </fieldset>
 
             <fieldset>
-                <legend>👤 Characters & Voices</legend>
-
-                <label class="form-label">Character Profiles (Voice IDs)</label>
-                <textarea class="form-control" id="character_details" rows="4"
-                placeholder="Narrator (Voice ID: xxx): Deep voice.&#10;Ali (Voice ID: xxx): Young man."></textarea>
-
-                <div class="row mt-3">
-                    <div class="col-md-6">
-                        <label class="form-label">Default Voice ID</label>
-                        <input type="text" class="form-control" name="voice_selection" placeholder="ElevenLabs Voice ID">
+                <legend><i class="bi bi-magic"></i> Viral Packaging</legend>
+                <div class="alert alert-light border d-flex align-items-center gap-3">
+                    <i class="bi bi-check-circle-fill text-success fs-4"></i>
+                    <div>
+                        <strong>Always Active:</strong>
+                        <div class="text-muted small">Viral Thumbnail Generation (Flux) + SEO Metadata Optimization (GPT-4)</div>
                     </div>
-
-                    <div class="col-md-6">
-                        <label class="form-label">Reference Face (Optional)</label>
-                        <input type="file" class="form-control" name="character_images" accept="image/*" multiple>
-                    </div>
-                </div>
-
-                <div class="form-check mt-3">
-                    <input class="form-check-input" type="checkbox" name="use_local_asset" value="true">
-                    <label class="form-check-label">Include Intro B-Roll</label>
                 </div>
             </fieldset>
 
-            <button type="submit" id="submitBtn" class="btn btn-primary">✨ Generate Video</button>
+            <button type="submit" id="submitBtn" class="btn btn-primary">
+                <i class="bi bi-lightning-charge-fill"></i> Start Production
+            </button>
         </form>
 
         <div id="statusArea">
             <span class="loader"></span>
-            <span id="statusText">Initializing...</span>
+            <h5 id="statusTitle" class="mt-2 fw-bold">Starting Engine...</h5>
+            <p id="statusText" class="text-muted mb-0">Connecting to server...</p>
         </div>
 
         <div id="resultArea">
-            <h3 class="text-center text-success mb-3">🎉 Video Ready!</h3>
-
-            <div class="video-wrapper">
-                <video id="finalVideo" controls playsinline preload="metadata"></video>
+            <div class="text-center mb-5">
+                <h2 class="fw-bold text-success mb-2">🚀 Production Complete!</h2>
+                <p class="text-muted">Your video has been polished, captioned, and packaged.</p>
             </div>
 
-            <div class="text-center">
-                <p class="fw-bold text-muted">Generated Thumbnail</p>
-                <img id="thumbnailPreview" style="max-width:200px;border-radius:8px;">
-            </div>
+            <div class="row">
+                <div class="col-md-5">
+                    <div class="video-container">
+                        <video id="finalVideo" controls playsinline></video>
+                    </div>
+                    <a id="downloadBtn" href="#" class="btn btn-dark w-100 mb-3" download>
+                        <i class="bi bi-download"></i> Download Video
+                    </a>
+                </div>
 
-            <div class="text-center mb-4">
-                <a id="downloadBtn" href="#" class="btn btn-outline-primary" download>⬇️ Download Video</a>
-                <button onclick="location.reload()" class="btn btn-secondary ms-2">New Video</button>
-            </div>
+                <div class="col-md-7">
+                    <div class="metadata-card">
+                        <div class="metadata-title"><i class="bi bi-image"></i> Viral Thumbnail</div>
+                        <img id="thumbnailPreview" class="thumb-preview" alt="Generated Thumbnail">
+                        <a id="downloadThumb" href="#" class="btn btn-sm btn-outline-secondary mt-2 w-100" target="_blank" download>Download High-Res</a>
+                    </div>
 
-            <div class="metadata-box">
-                <h5 class="border-bottom pb-2">📋 Video Metadata</h5>
-                <p><strong>Title:</strong> <span id="metaTitle"></span></p>
-                <p><strong>Description:</strong></p>
-                <p id="metaDesc" style="white-space: pre-wrap;"></p>
-                <p><strong>Tags:</strong></p>
-                <div id="metaTags"></div>
+                    <div class="metadata-card">
+                        <div class="metadata-title"><i class="bi bi-file-text"></i> SEO Metadata</div>
+                        <div class="mb-3">
+                            <label class="small text-muted fw-bold">TITLE</label>
+                            <div id="metaTitle" class="fw-bold fs-5"></div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="small text-muted fw-bold">DESCRIPTION</label>
+                            <p id="metaDesc" class="small text-muted" style="white-space: pre-wrap;"></p>
+                        </div>
+                        <div>
+                            <label class="small text-muted fw-bold">TAGS</label>
+                            <div id="metaTags" class="tag-cloud"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="metadata-card">
+                         <div class="metadata-title"><i class="bi bi-chat-quote"></i> Transcript</div>
+                         <textarea id="transcriptBox" class="form-control form-control-sm" rows="3" readonly></textarea>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="text-center mt-4">
+                <button onclick="location.reload()" class="btn btn-link text-muted">Process Another Video</button>
             </div>
         </div>
     </div>
 
     <script>
-        const form = document.getElementById("generateForm");
+        const form = document.getElementById("editorForm");
         const statusArea = document.getElementById("statusArea");
-        const resultArea = document.getElementById("resultArea");
+        const statusTitle = document.getElementById("statusTitle");
         const statusText = document.getElementById("statusText");
+        const resultArea = document.getElementById("resultArea");
         const btn = document.getElementById("submitBtn");
 
+        // Use the same endpoint logic as before, just mapped to new UI
         form.onsubmit = async (e) => {
             e.preventDefault();
-
             btn.disabled = true;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Processing...';
+            
             resultArea.style.display = "none";
             statusArea.style.display = "block";
-            statusText.innerText = "Submitting Task...";
-
+            
             const formData = new FormData(form);
 
-            const details = document.getElementById("character_details").value;
-            if (details.trim()) {
-                formData.append("characters", details);
-            }
-
             try {
+                // IMPORTANT: Ensure your backend route is '/process_video' or similar, 
+                // OR update the celery_worker to handle this 'task_type' if using a single route.
+                // For this example, we assume the backend maps POST /generate to the new worker logic.
                 const res = await fetch("/generate", { method: "POST", body: formData });
                 const data = await res.json();
+                
                 if (data.status === "error") throw new Error(data.message);
-
+                
                 pollTask(data.task_id);
 
             } catch (err) {
@@ -206,19 +249,20 @@
                     const res = await fetch(`/check_result/${taskId}`);
                     const data = await res.json();
 
-                    if (data.status === "ready") {
+                    if (data.status === "ready" || data.status === "success") {
                         clearInterval(interval);
                         displaySuccess(data);
-                    } else if (data.status === "error") {
+                    } else if (data.status === "error" || data.status === "failed") {
                         clearInterval(interval);
                         showError(data.message);
                     } else {
-                        statusText.innerText = data.message || "AI is working...";
+                        // Update loading text based on worker logs (if available)
+                        statusTitle.innerText = " AI Editor at Work";
+                        statusText.innerText = data.message || "Processing video frames...";
                     }
-
                 } catch (e) {
                     clearInterval(interval);
-                    showError("Connection lost.");
+                    showError("Lost connection to server.");
                 }
             }, 3000);
         }
@@ -226,39 +270,51 @@
         function displaySuccess(data) {
             statusArea.style.display = "none";
             resultArea.style.display = "block";
+            btn.innerHTML = '<i class="bi bi-lightning-charge-fill"></i> Start Production';
+            btn.disabled = false;
 
-            document.getElementById("finalVideo").src = data.video_url;
-
-            if (data.thumbnail_url) {
-                document.getElementById("thumbnailPreview").src = data.thumbnail_url;
-            }
-
+            // 1. Video
+            const vid = document.getElementById("finalVideo");
+            vid.src = data.video_url;
             document.getElementById("downloadBtn").href = data.video_url;
 
+            // 2. Thumbnail
+            if (data.thumbnail_url) {
+                document.getElementById("thumbnailPreview").src = data.thumbnail_url;
+                document.getElementById("downloadThumb").href = data.thumbnail_url;
+            }
+
+            // 3. Metadata
             if (data.metadata) {
-                document.getElementById("metaTitle").innerText = data.metadata.title || "";
+                document.getElementById("metaTitle").innerText = data.metadata.title || "Untitled";
                 document.getElementById("metaDesc").innerText = data.metadata.description || "";
-
+                
+                const tagsDiv = document.getElementById("metaTags");
+                tagsDiv.innerHTML = "";
                 const tags = data.metadata.tags || [];
-                const div = document.getElementById("metaTags");
-                div.innerHTML = "";
-
                 tags.forEach(t => {
                     const s = document.createElement("span");
                     s.className = "tag";
-                    s.innerText = t;
-                    div.appendChild(s);
+                    s.innerText = "#" + t.replace(/#/g, '');
+                    tagsDiv.appendChild(s);
                 });
+            }
+            
+            // 4. Transcript
+            if (data.transcript_srt) {
+                document.getElementById("transcriptBox").value = data.transcript_srt;
             }
         }
 
         function showError(msg) {
             statusArea.style.background = "#fee2e2";
-            statusArea.style.color = "#b91c1c";
-            statusText.innerHTML = `<strong>Error:</strong> ${msg}`;
+            statusArea.style.color = "#991b1b";
+            statusArea.style.border = "1px solid #fecaca";
+            statusTitle.innerText = "Production Failed";
+            statusText.innerHTML = msg;
             btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-lightning-charge-fill"></i> Try Again';
         }
     </script>
 </body>
 </html>
-
