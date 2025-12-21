@@ -43,21 +43,20 @@ except ImportError:
     logging.warning("⚠️ OpenAI TTS client not found. Fallback will not work.")
 
 # --- CONSTANTS FOR VOICES AND AVATARS ---
-# Internal IDs used for routing logic (Do not change these keys)
+# Internal IDs used for routing logic
 MALE_VOICE_ID = "ErXwobaYiN019PkySvjV" 
 FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
-# --- FIXED CAST LIST (Using SAFE STOCK AVATARS to ensure Audio works) ---
+# --- FIXED CAST LIST (YOUR CINEMATIC CUSTOM IDS) ---
+# The new Smart Client will detect these are Talking Photos.
 CAST_LIST = {
-    # We use these PUBLIC IDs because they are guaranteed to exist on all accounts.
-    # It will look like a newscaster, but it will TALK.
-    "MALE_LEAD": "josh_lite3_20230714",     # Josh (Public Male)
-    "FEMALE_LEAD": "anna_public_2024",      # Anna (Public Female)
-    "NARRATOR": "josh_lite3_20230714"       # Narrator
+    "MALE_LEAD": "4343bfb447bf4028a48b598ae297f5dc",    # Your Custom Male
+    "FEMALE_LEAD": "16a811adf1cc4b12bc6edd04c8fecffa",  # Your Custom Female
+    "NARRATOR": "4343bfb447bf4028a48b598ae297f5dc"      # Narrator (Male)
 }
 
-# Fallback
-SAFE_FALLBACK_AVATAR_ID = "josh_lite3_20230714" 
+# Initial Fallback (Will be updated dynamically if this one is dead)
+SAFE_FALLBACK_AVATAR_ID = "4343bfb447bf4028a48b598ae297f5dc"
 
 # --- Utility Fix: Define missing ensure_dir function ---
 def ensure_dir(path):
@@ -94,7 +93,6 @@ try:
     from video_clients.heygen_client import (
         generate_heygen_video, 
         get_all_avatars, 
-        get_safe_fallback_id, 
         HeyGenError
     )
     HEYGEN_AVAILABLE = True
@@ -102,7 +100,6 @@ except ImportError as e:
     logging.error(f"❌ HEYGEN CLIENT NOT FOUND. Video generation will fail. IMPORT ERROR: {e}")
     generate_heygen_video = None
     get_all_avatars = None
-    get_safe_fallback_id = lambda: SAFE_FALLBACK_AVATAR_ID
     HEYGEN_AVAILABLE = False
 
 
@@ -357,7 +354,7 @@ def process_single_scene(
             
         char_data = character_faces.get(target_char_name, {})
         # FORCE fallback to default if ID is missing or known invalid
-        avatar_id = char_data.get("heygen_avatar_id") or SAFE_FALLBACK_AVATAR_ID
+        avatar_id = char_data.get("heygen_avatar_id") or fallback_avatar_id
         
         # Upload Audio
         cloud_audio_url = None
@@ -603,13 +600,21 @@ def background_generate_video(self, form_data: dict):
         keyword = form_data.get("keyword")
         if not keyword: raise ValueError("Keyword required")
         
-        # --- 1. DYNAMIC AVATAR FETCH ---
+        # --- 1. DYNAMIC AVATAR FETCH & FALLBACK SETUP ---
         update_status("Fetching Available Avatars...")
-        available_avatars = []
+        real_fallback_id = SAFE_FALLBACK_AVATAR_ID
+        
         try:
             if get_all_avatars:
                 available_avatars = get_all_avatars()
                 logging.info(f"✅ Found {len(available_avatars)} avatars in account.")
+                
+                # If we have avatars, pick the first one as a TRUE safety net if default is dead
+                if available_avatars:
+                    first_avail = available_avatars[0].get("avatar_id") or available_avatars[0].get("id")
+                    if first_avail:
+                        real_fallback_id = first_avail
+                        logging.info(f"🛡️ System Fallback set to: {real_fallback_id}")
         except Exception as e:
             logging.error(f"Avatar fetch error: {e}.")
 
@@ -641,9 +646,9 @@ def background_generate_video(self, form_data: dict):
              # Detect Gender/Role (Using User Configurable Map)
              if "man" in prompt or "detective" in prompt or "male" in prompt:
                 # IMPORTANT: Replace CAST_LIST IDs with valid ones if not set
-                selected_id = CAST_LIST.get("MALE_LEAD", SAFE_FALLBACK_AVATAR_ID)
+                selected_id = CAST_LIST.get("MALE_LEAD", real_fallback_id)
              elif "woman" in prompt or "female" in prompt or "girl" in prompt:
-                selected_id = CAST_LIST.get("FEMALE_LEAD", SAFE_FALLBACK_AVATAR_ID)
+                selected_id = CAST_LIST.get("FEMALE_LEAD", real_fallback_id)
              
              # Save the assignment
              char_data["heygen_avatar_id"] = selected_id
@@ -729,7 +734,7 @@ def background_generate_video(self, form_data: dict):
                     asset["audio_path"], 
                     character_faces, 
                     aspect,
-                    SAFE_FALLBACK_AVATAR_ID,
+                    real_fallback_id, # Use Dynamic Fallback here
                     asset["background_url"] 
                 ): asset
                 for asset in scene_assets
