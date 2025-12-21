@@ -81,6 +81,7 @@ except Exception:
 
 # --- CRITICAL FIX: ROBUST HEYGEN CLIENT IMPORT ---
 try:
+    # REMOVED 'get_safe_fallback_id' to fix the import error
     from video_clients.heygen_client import (
         generate_heygen_video, 
         get_all_avatars, 
@@ -429,19 +430,17 @@ def refine_script_with_roles(storyboard, form_data, char_faces):
         segments.append({"text": text, "voice_id": assigned_voice})
     return segments
 
-# --- CRITICAL UPDATE: USE THE EXTERNAL THUMBNAIL PROMPT FILE ---
+# --- UPDATED: GENERATE THUMBNAIL (No skipping) ---
 def generate_thumbnail_agent(storyboard: dict, aspect: str = "16:9") -> Optional[str]:
-    # Load the high-quality artist prompt you uploaded
+    # Try to load the high-quality prompt file
     prompt_template = load_prompt_template("prompt_image_synthesizer.txt")
     
     if prompt_template:
-        # Use the template logic
         summary = storyboard.get("video_description") or storyboard.get("video_title") or "Cinematic Scene"
-        # Extract characters description from the manifest
         chars_desc = ", ".join([c.get('name','') + ": " + c.get('appearance_prompt','') for c in storyboard.get('characters', [])])
         
         template = Template(prompt_template)
-        # Safe substitute prevents crashes if variables are missing
+        # Use safe substitution to avoid crashes
         prompt = template.safe_substitute(
             article_summary=summary,
             characters=chars_desc,
@@ -457,6 +456,7 @@ def generate_thumbnail_agent(storyboard: dict, aspect: str = "16:9") -> Optional
     except: 
         return None
 
+# --- UPDATED: YOUTUBE METADATA (No skipping) ---
 def youtube_metadata_agent(script, keyword, form_data, blueprint):
     prompt = load_prompt_template("prompt_youtube_metadata_generator.txt")
     if not prompt: return {}
@@ -582,7 +582,7 @@ def background_generate_video(self, form_data: dict):
         update_status("Uploading & Finalizing...")
         final_video_url = safe_upload_to_cloudinary(final_output, folder="final_videos")
         
-        # Call the updated agents
+        # Call the FULLY IMPLEMENTED Agents
         thumbnail_url = generate_thumbnail_agent(storyboard, aspect)
         meta = youtube_metadata_agent(full_script, keyword, form_data, {})
         
