@@ -1,114 +1,99 @@
+# file: main.py
 import os
 import logging
-import json
-from functools import wraps
-from flask import Flask, render_template, request, jsonify, Response
-from dotenv import load_dotenv
-import cloudinary
-import cloudinary.uploader
+from flask import Flask, request, jsonify, render_template
+from celery.result import AsyncResult
+from celery_init import celery 
 
-# Load environment
-load_dotenv()
+# Import the NEW task from your updated worker
+# Ensure your celery_worker.py defines 'process_video_upload'
+from celery_worker import process_video_upload
 
-# Celery Imports
-from celery_init import celery
-from celery_worker import background_generate_video
+app = Flask(__name__)
 
-# Logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s]: %(message)s")
+# Configure Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Flask
-app = Flask(__name__, template_folder="templates")
-
-# Cloudinary config
-if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.getenv("CLOUDINARY_API_SECRET")]):
-    cloudinary.config(
-        cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
-        api_key=os.getenv("CLOUDINARY_API_KEY"),
-        api_secret=os.getenv("CLOUDINARY_API_SECRET"),
-        secure=True
-    )
-
-# ------------------ SECURITY (Optional) ------------------
-def check_auth(username, password):
-    users_json_str = os.environ.get("APP_USERS_JSON")
-    if not users_json_str: return True
-    try:
-        valid_users = json.loads(users_json_str)
-        return username in valid_users and valid_users.get(username) == password
-    except: return False
-
-def authenticate():
-    return Response('Login Required', 401, {'WWW-Authenticate': 'Basic realm="Login Required"'})
-
-def requires_auth(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        if not os.environ.get("APP_USERS_JSON"): return f(*args, **kwargs)
-        auth = request.authorization
-        if not auth or not check_auth(auth.username, auth.password): return authenticate()
-        return f(*args, **kwargs)
-    return wrapper
-
-# ------------------ ROUTES ------------------
-
-@app.route("/health")
-def health_check():
-    return jsonify({"status": "ok"}), 200
-
-@app.route("/")
-@requires_auth
+@app.route('/')
 def index():
-    return render_template("index.html")
+    return render_template('index.html')
 
-@app.route("/generate", methods=["POST"])
-@requires_auth
-def generate():
-    form_data = request.form.to_dict()
+@app.route('/generate', methods=['POST'])
+def generate_endpoint():
+    """
+    Receives the Editing Request from the Frontend.
+    """
+    try:
+        # 1. Get Data from Form
+        video_url = request.form.get('video_url')
+        remove_silence = request.form.get('remove_silence', 'false')
+        blur_watermarks = request.form.get('blur_watermarks', 'false')
+        add_subtitles = request.form.get('add_subtitles', 'false')
 
-    if not form_data.get("keyword"):
-        return jsonify({"status": "error", "message": "Keyword is required"}), 400
+        # 2. Validation
+        if not video_url:
+            return jsonify({"status": "error", "message": "Please provide a valid Video URL."}), 400
 
-    # --- IMAGE UPLOAD LOGIC ---
-    uploaded_urls = []
-    if "character_images" in request.files:
-        files = request.files.getlist("character_images")
-        for f in files:
-            if f and f.filename.strip() != "":
-                try:
-                    upload = cloudinary.uploader.upload(f, folder="character_references", resource_type="image")
-                    uploaded_urls.append(upload["secure_url"])
-                except Exception as e:
-                    logging.error(f"Image Upload Failed: {e}")
+        # 3. Payload for Worker
+        form_data = {
+            "video_url": video_url,
+            "remove_silence": remove_silence,
+            "blur_watermarks": blur_watermarks,
+            "add_subtitles": add_subtitles
+        }
 
-    # [CRITICAL FIX] Matching the key expected by celery_worker.py
-    form_data["uploaded_images"] = uploaded_urls 
+        logger.info(f"🚀 Starting Editing Job for: {video_url}")
 
-    # --- DISPATCH TASK ---
-    task = background_generate_video.delay(form_data)
-    
-    # Return JSON so the frontend JS can handle the polling
-    return jsonify({"status": "success", "task_id": task.id})
+        # 4. Trigger Celery Task (The Editor Engine)
+        task = process_video_upload.delay(form_data)
 
-@app.route("/check_result/<task_id>")
+        return jsonify({
+            "status": "success", 
+            "task_id": task.id,
+            "message": "Video queued for editing."
+        })
+
+    except Exception as e:
+        logger.error(f"Server Error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/check_result/<task_id>', methods=['GET'])
 def check_result(task_id):
-    result = celery.AsyncResult(task_id)
-    response = {"status": result.state.lower(), "message": "Processing..."}
-
-    if result.state == 'PENDING':
-        response["message"] = "Queued..."
-    elif result.state == 'PROGRESS':
-        info = result.info if isinstance(result.info, dict) else {}
-        response.update(info)
-    elif result.state == 'SUCCESS':
-        response.update(result.result if isinstance(result.result, dict) else {})
-        response['status'] = "ready"
-    elif result.state == 'FAILURE':
-        response["status"] = "error"
-        response["message"] = str(result.info)
-
+    """
+    Checks the status of the Celery task.
+    """
+    task = AsyncResult(task_id, app=celery)
+    
+    if task.state == 'PENDING':
+        response = {
+            'status': 'pending',
+            'message': 'Job is in queue...'
+        }
+    elif task.state == 'PROGRESS':
+        response = {
+            'status': 'progress',
+            'message': task.info.get('message', 'Processing...')
+        }
+    elif task.state == 'SUCCESS':
+        # task.result is the return value from the worker function
+        response = task.result 
+        if not response: # Safety check
+             response = {'status': 'error', 'message': 'Unknown error occurred.'}
+    elif task.state == 'FAILURE':
+        response = {
+            'status': 'error',
+            'message': str(task.info)
+        }
+    else:
+        response = {
+            'status': 'unknown',
+            'message': f'Unknown state: {task.state}'
+        }
+        
     return jsonify(response)
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    # Use PORT env for deployment (Railway/Heroku) or default to 5000
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
