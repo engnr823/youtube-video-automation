@@ -43,10 +43,20 @@ except ImportError:
     logging.warning("⚠️ OpenAI TTS client not found. Fallback will not work.")
 
 # --- CONSTANTS FOR VOICES AND AVATARS ---
+# Internal IDs used for routing logic
 MALE_VOICE_ID = "ErXwobaYiN019PkySvjV" 
 FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
-# Safe "Lite" Avatar (Josh) that works on almost all plans to avoid 404s
+# --- FIXED CAST LIST (The "Stars" of your SaaS) ---
+# REPLACE THESE IDs WITH VALID AVATAR IDs FROM YOUR HEYGEN ACCOUNT
+# If you don't have a specific Male ID, use the Safe Fallback or a generic public one.
+CAST_LIST = {
+    "MALE_LEAD": "wayne_20240101",        # <--- REPLACE with a specific Male Avatar ID
+    "FEMALE_LEAD": "josh_lite3_20230714", # <--- Using Josh/Lite as safe fallback or Female ID
+    "NARRATOR": "faiza_news_2024"         # <--- REPLACE with Narrator ID
+}
+
+# Fallback if list fails
 SAFE_FALLBACK_AVATAR_ID = "josh_lite3_20230714" 
 
 # --- Utility Fix: Define missing ensure_dir function ---
@@ -138,13 +148,9 @@ class SceneSchema(BaseModel):
     action_prompt: str
     audio_narration: Optional[str] = ""
     shot_type: Optional[str] = "medium"
-    camera_angle: Optional[str] = "35mm"
-    lighting: Optional[str] = "soft cinematic"
-    emotion: Optional[str] = "neutral"
+    is_b_roll: Optional[bool] = False # <--- HYBRID ENGINE: Added field for B-Roll
     characters_in_scene: Optional[List[str]] = []
-    image_url: Optional[str] = None
-    video_url: Optional[str] = None
-
+    
 class StoryboardSchema(BaseModel):
     video_title: str
     video_description: Optional[str] = ""
@@ -235,12 +241,11 @@ def extract_json_list_from_text(text: str) -> Optional[list]:
     return None
 
 # -------------------------
-# Image generation (MODIFIED: Uses Flux via Replicate)
+# Image generation (Flux via Replicate)
 # -------------------------
 def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str = "") -> str:
     """
     Generates a background image using Flux-Schnell (Replicate) for low cost.
-    Replaces the previous DALL-E 3 implementation.
     """
     try:
         logging.info(f"🎨 Generating background with Flux (Replicate): {prompt[:30]}...")
@@ -262,7 +267,6 @@ def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str 
         
         # Replicate usually returns a list of output URLs/objects
         if output:
-            # Flux-Schnell returns a list of FileOutput objects or strings
             image_url = str(output[0])
             logging.info("✅ Background generated successfully (Flux).")
             return image_url
@@ -270,13 +274,32 @@ def generate_flux_image(prompt: str, aspect: str = "16:9", negative_prompt: str 
     except Exception as e:
         logging.error(f"Flux generation failed: {e}")
 
-    # Fallback to DALL-E if Flux fails (optional safety net) or Placeholder
+    # Fallback
     logging.warning("⚠️ Using placeholder image.")
     return "https://placeimg.com/480/832/abstract"
 
+# -------------------------
+# B-Roll Video Creator (Local FFmpeg)
+# -------------------------
+def create_static_video_from_image(image_path: str, duration: float, output_path: str) -> bool:
+    """Creates a static video from an image to serve as B-Roll (Saving HeyGen credits)."""
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-loop", "1", "-i", image_path,
+            "-t", str(duration),
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=30",
+            "-preset", "ultrafast",
+            output_path
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return os.path.exists(output_path)
+    except Exception as e:
+        logging.error(f"Failed to create B-Roll video: {e}")
+        return False
 
 # -------------------------
-# Single scene processor (UPDATED: COMPOSITING WORKFLOW)
+# Single scene processor (UPDATED: HYBRID & COMPOSITING)
 # -------------------------
 def process_single_scene(
     scene: dict,
@@ -297,34 +320,7 @@ def process_single_scene(
     os.makedirs(temp_dir, exist_ok=True)
     
     try:
-        # 1. Identify Character/Avatar ID for this scene
-        character_list = scene.get('characters_in_scene')
-        target_char_name = character_list[0] if character_list and len(character_list) > 0 else None
-        
-        if not target_char_name:
-            target_char_name = list(character_faces.keys())[0] if character_faces else "MENTOR"
-            
-        char_data = character_faces.get(target_char_name, {})
-        avatar_id = char_data.get("heygen_avatar_id") 
-        
-        # --- Fallback Logic ---
-        if not avatar_id:
-            logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Using dynamic fallback.")
-            avatar_id = fallback_avatar_id
-
-        if not avatar_id:
-             avatar_id = SAFE_FALLBACK_AVATAR_ID
-
-        # 2. Upload Audio
-        cloud_audio_url = None
-        if audio_path and os.path.exists(audio_path):
-            cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
-            
-        if not cloud_audio_url:
-             logging.warning(f"Scene {index} skipped as required audio/avatar is missing.")
-             return {"index": index, "video_path": None, "status": "skipped"}
-
-        # --- 3. BACKGROUND HANDLING (Composite Flow) ---
+        # --- 1. BACKGROUND PREP ---
         bg_image_local_path = os.path.join(temp_dir, f"bg_{index}.jpg")
         if background_url:
             try:
@@ -334,7 +330,47 @@ def process_single_scene(
         else:
             logging.warning(f"No background URL provided for scene {index}")
 
-        # --- 4. HEYGEN GENERATION (GREEN SCREEN) ---
+        # --- 2. CHECK FOR B-ROLL (COST SAVING MODE) ---
+        is_b_roll = scene.get("is_b_roll", False)
+        
+        if is_b_roll:
+            logging.info(f"💰 Scene {index} is B-Roll. Skipping HeyGen to save credits.")
+            final_scene_path = os.path.join(temp_dir, f"scene_gen_{index}.mp4")
+            duration = scene.get("duration_seconds", 5.0)
+            
+            # Create simple video from Flux Background
+            if os.path.exists(bg_image_local_path):
+                create_static_video_from_image(bg_image_local_path, duration, final_scene_path)
+                return {"index": index, "video_path": final_scene_path, "status": "success"}
+            else:
+                 logging.error(f"B-Roll scene {index} failed: No background image.")
+                 return {"index": index, "video_path": None, "status": "failed"}
+
+        # --- 3. DIALOGUE SCENE (HEYGEN) ---
+        
+        # Identify Character/Avatar ID for this scene
+        character_list = scene.get('characters_in_scene')
+        target_char_name = character_list[0] if character_list and len(character_list) > 0 else None
+        
+        if not target_char_name:
+            target_char_name = list(character_faces.keys())[0] if character_faces else "MENTOR"
+            
+        char_data = character_faces.get(target_char_name, {})
+        avatar_id = char_data.get("heygen_avatar_id") 
+        
+        if not avatar_id:
+            logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Using fallback.")
+            avatar_id = fallback_avatar_id or SAFE_FALLBACK_AVATAR_ID
+
+        # Upload Audio
+        cloud_audio_url = None
+        if audio_path and os.path.exists(audio_path):
+            cloud_audio_url = safe_upload_to_cloudinary(audio_path, resource_type="video", folder="temp_audio")
+            
+        if not cloud_audio_url:
+             logging.warning(f"Scene {index} skipped as required audio is missing.")
+             return {"index": index, "video_path": None, "status": "skipped"}
+
         logging.info(f"Calling HeyGen for Green Screen Scene {index} (Avatar: {avatar_id})")
         
         video_url = generate_heygen_video(
@@ -348,11 +384,11 @@ def process_single_scene(
         if not video_url:
             raise RuntimeError("Video generation failed via HeyGen")
 
-        # 5. Download Green Screen Video
+        # Download Green Screen Video
         green_screen_path = os.path.join(temp_dir, f"green_raw_{index}.mp4")
         download_to_file(str(video_url), green_screen_path, timeout=300)
 
-        # 6. COMPOSITE (Flux BG + Green Screen Actor + Camera Move)
+        # COMPOSITE (Flux BG + Green Screen Actor)
         final_scene_path = os.path.join(temp_dir, f"scene_gen_{index}.mp4")
         
         composite_success = False
@@ -374,7 +410,6 @@ def process_single_scene(
                 shutil.copy(green_screen_path, final_scene_path)
         
         if not os.path.exists(final_scene_path):
-             logging.error(f"Scene {index} reported success but file is missing at {final_scene_path}")
              return {"index": index, "video_path": None, "status": "failed"}
 
         return {"index": index, "video_path": final_scene_path, "status": "success"}
@@ -402,15 +437,29 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
             if not os.path.exists(video): continue
 
             chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
-            audio_dur = get_media_duration(audio)
-            if audio_dur <= 0: audio_dur = 5.0
+            
+            # Calculate duration - if B-Roll (no audio), use video duration
+            audio_dur = get_media_duration(audio) if audio and os.path.exists(audio) else 0.0
+            video_dur = get_media_duration(video)
+            
+            # Use audio duration if available, else video duration
+            final_dur = audio_dur if audio_dur > 0.5 else video_dur
+            if final_dur <= 0: final_dur = 5.0
             
             cmd = [
                 "ffmpeg", "-y", 
                 "-stream_loop", "-1", "-i", video, 
-                "-i", audio,
-                "-t", str(audio_dur),
-                "-map", "0:v", "-map", "1:a",
+            ]
+            
+            # Add audio input if exists
+            if audio and os.path.exists(audio):
+                 cmd.extend(["-i", audio, "-map", "0:v", "-map", "1:a"])
+            else:
+                 # Generate silent audio for B-Roll consistency
+                 cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-map", "0:v", "-map", "1:a"])
+
+            cmd.extend([
+                "-t", str(final_dur),
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
                 "-preset", "ultrafast",
@@ -418,7 +467,7 @@ def stitch_video_audio_pairs_optimized(scene_pairs: List[Tuple[str, str]], outpu
                 "-c:a", "aac",
                 "-shortest",
                 chunk_name
-            ]
+            ])
             subprocess.run(cmd, check=True, capture_output=True)
             chunk_paths.append(chunk_name)
 
@@ -479,7 +528,7 @@ def create_video_storyboard_agent(keyword: str, blueprint: dict, form_data: dict
         uploaded_assets_context="User uploaded images present" if form_data.get("uploaded_images") else "No uploads",
         max_scenes=str(target_scenes)
     )
-    prompt += f"\n\nIMPORTANT: The 'audio_narration' across all scenes MUST total at least 150 words (60+ seconds total length). Generate exactly {target_scenes} scenes. For dialogue, explicitly start the narration with the character name followed by a colon (e.g., KABIR: Hello. ZARA: Hi.). ALSO, include a 'duration_seconds' of 6 to 10 seconds for EACH scene object."
+    # Note: Prompt logic is now handled by the 9-Line Protocol file
     raw = get_openai_response(prompt, temperature=0.6, is_json=True)
     obj = extract_json_from_text(raw) or (json.loads(raw) if raw else {})
     if not obj: raise RuntimeError("Storyboard generation failed")
@@ -492,15 +541,15 @@ def refine_script_with_roles(storyboard: dict, form_data: dict, char_faces: dict
     
     for scene in storyboard.get("scenes", []):
         text = scene.get("audio_narration", "")
-        if not text: continue
+        # Note: B-Roll might have empty text or [SFX], handled downstream
         
         char_list = scene.get('characters_in_scene', [])
         char_name = char_list[0] if char_list else "Unknown"
         char_data = char_faces.get(char_name, {})
         
-        # Determine Voice Gender
+        # Determine Voice Gender for Routing
         assigned_voice = MALE_VOICE_ID 
-        if "female" in str(char_data) or "woman" in str(char_data) or "girl" in str(char_data):
+        if "female" in str(char_data) or "woman" in str(char_data) or "girl" in str(char_data) or "Sana" in char_name:
              assigned_voice = FEMALE_VOICE_ID
              
         segments.append({"text": text, "voice_id": assigned_voice})
@@ -582,49 +631,27 @@ def background_generate_video(self, form_data: dict):
         uploaded_images = form_data.get("uploaded_images") or []
         character_faces = {}
         
-        # --- NEW CASTING LOGIC: GENDER AWARE + UPLOADED IMAGE ---
+        # --- FIXED CASTING LOGIC (HYBRID ENGINE) ---
         for i, char in enumerate(characters):
              name = char.get("name", "Unknown")
              prompt = char.get("appearance_prompt", "").lower()
              
              char_data = ensure_character(name, appearance_prompt=char.get("appearance_prompt"))
              
-             # --- FIX: Match uploaded image to character name ---
-             # Assuming filename or URL contains the character name (case-insensitive)
-             ref_image = next((url for url in uploaded_images if name.lower() in url.lower()), None)
+             # Default to Narrator
+             selected_id = CAST_LIST["NARRATOR"]
+            
+             # Detect Gender/Role (Using User Configurable Map)
+             if "man" in prompt or "detective" in prompt or "male" in prompt:
+                # IMPORTANT: Replace CAST_LIST IDs with valid ones if not set
+                selected_id = CAST_LIST.get("MALE_LEAD", SAFE_FALLBACK_AVATAR_ID)
+             elif "woman" in prompt or "female" in prompt or "girl" in prompt:
+                selected_id = CAST_LIST.get("FEMALE_LEAD", SAFE_FALLBACK_AVATAR_ID)
              
-             # Initial selection
-             selected_id = None
-             
-             # If user uploaded an image for this character, prefer using a relevant avatar 
-             # (In a real scenario, you'd create an avatar from this image, but here we pick a fallback or generic)
-             # For now, we will just store the ref_image.
-             
-             is_male = "man" in prompt or "male" in prompt or "boy" in prompt or "detective" in prompt
-             is_female = "woman" in prompt or "female" in prompt or "girl" in prompt
-             
-             if available_avatars:
-                 if is_male:
-                     # Filter for Male-sounding names
-                     males = [a for a in available_avatars if any(x in a.get("name","").lower() for x in ["josh", "pierce", "wayne", "fin", "anthony", "michael", "david", "male", "man"])]
-                     if males:
-                         selected_id = random.choice(males).get("avatar_id")
-                 elif is_female:
-                     females = [a for a in available_avatars if any(x in a.get("name","").lower() for x in ["abigail", "sarah", "monica", "amber", "female", "woman"])]
-                     if females:
-                         selected_id = random.choice(females).get("avatar_id")
-                 
-                 # --- CRITICAL FALLBACK: IF NO SPECIFIC MATCH, USE ANY AVATAR ---
-                 if not selected_id:
-                     logging.warning(f"⚠️ No specific match for {name}, picking random avatar from account.")
-                     selected_id = available_avatars[i % len(available_avatars)].get("avatar_id")
-             else:
-                 # No avatars in account at all? Use Safe Fallback (might fail if not in acct)
-                 selected_id = SAFE_FALLBACK_AVATAR_ID
-             
+             # Save the assignment
              char_data["heygen_avatar_id"] = selected_id
-             char_data["reference_image"] = ref_image 
              character_faces[name] = char_data
+             logging.info(f"🎭 Cast {name} as ID: {selected_id}")
         
         char_profile = characters[0].get("appearance_prompt", "Cinematic") if characters else "Cinematic"
 
@@ -636,51 +663,63 @@ def background_generate_video(self, form_data: dict):
         aspect = "9:16" if form_data.get("video_type") == "reel" else "16:9"
 
         for i, scene in enumerate(scenes):
+            # Check B-Roll status
+            is_b_roll = scene.get("is_b_roll", False)
+            
             text = segments[i].get("text") if i < len(segments) else "..."
             voice_id = segments[i].get("voice_id") if i < len(segments) else MALE_VOICE_ID
-            full_script_text += text + " "
+            if not is_b_roll:
+                full_script_text += text + " "
             
             # --- AUDIO GENERATION (WITH OPENAI FALLBACK) ---
             audio_path = None
             
-            # Try ElevenLabs first
-            try:
-                if generate_audio_for_scene:
-                    audio_res = generate_audio_for_scene(text, voice_id)
-                    audio_path = audio_res.get("path") if audio_res else None
-            except Exception as e:
-                logging.warning(f"ElevenLabs error scene {i}: {e}")
-
-            # Fallback to OpenAI TTS if ElevenLabs failed or returned nothing
-            if not audio_path:
-                logging.info(f"⚠️ Switching to OpenAI TTS for scene {i} due to ElevenLabs failure/quota.")
+            # If B-Roll, we skip speech generation (unless there's specific SFX logic later)
+            if not is_b_roll:
+                # Try ElevenLabs first
                 try:
-                    if generate_openai_speech:
-                        # Simple gender mapping for OpenAI voices
-                        voice_preset = "onyx" if voice_id == MALE_VOICE_ID else "nova"
-                        audio_path = generate_openai_speech(text, voice_category=voice_preset)
-                    else:
-                        logging.error("OpenAI TTS client not available for fallback.")
+                    if generate_audio_for_scene:
+                        audio_res = generate_audio_for_scene(text, voice_id)
+                        audio_path = audio_res.get("path") if audio_res else None
                 except Exception as e:
-                    logging.error(f"OpenAI TTS fallback failed: {e}")
+                    logging.warning(f"ElevenLabs error scene {i}: {e}")
+
+                # Fallback to OpenAI TTS if ElevenLabs failed or returned nothing
+                if not audio_path:
+                    logging.info(f"⚠️ Switching to OpenAI TTS for scene {i} due to ElevenLabs failure/quota.")
+                    try:
+                        if generate_openai_speech:
+                            # --- SMART GENDER MAPPING FOR OPENAI ---
+                            # Maps the HeyGen voice ID logic to OpenAI Voices
+                            voice_preset = "alloy" # default
+                            if voice_id == MALE_VOICE_ID:
+                                voice_preset = "onyx" # Gritty Male
+                            elif voice_id == FEMALE_VOICE_ID:
+                                voice_preset = "nova" # Soft Female
+                            
+                            audio_path = generate_openai_speech(text, voice_category=voice_preset)
+                        else:
+                            logging.error("OpenAI TTS client not available for fallback.")
+                    except Exception as e:
+                        logging.error(f"OpenAI TTS fallback failed: {e}")
             
             # B. Generate Background
+            # Extract visual prompt from 9-Line Block
             visual_prompt = scene.get("visual_prompt", "Background")
             bg_url = generate_flux_image(visual_prompt, aspect=aspect)
 
-            if audio_path:
-                scene_assets.append({
-                    "index": i, 
-                    "audio_path": audio_path, 
-                    "duration": get_media_duration(audio_path),
-                    "scene_data": scene,
-                    "background_url": bg_url
-                })
+            scene_assets.append({
+                "index": i, 
+                "audio_path": audio_path, 
+                "duration": get_media_duration(audio_path) if audio_path else 5.0,
+                "scene_data": scene,
+                "background_url": bg_url
+            })
 
         if not scene_assets: raise RuntimeError("Assets generation failed.")
 
         # --- 5. VIDEO RENDERING ---
-        update_status("Rendering Video Scenes (HeyGen)...")
+        update_status("Rendering Video Scenes (Hybrid Engine)...")
         final_pairs = []
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -708,7 +747,7 @@ def background_generate_video(self, form_data: dict):
                     res = {"status": "failed"}
                 
                 if res.get("status") == "success" and res.get("video_path"):
-                    results_map[idx] = (res["video_path"], asset["audio_path"])
+                    results_map[idx] = (res["video_path"], asset.get("audio_path"))
                 else: 
                     logging.warning(f"Scene {idx} failed.")
 
@@ -728,6 +767,7 @@ def background_generate_video(self, form_data: dict):
         final_output_path = f"/tmp/final_render_{task_id}.mp4"
         temp_visual_path = f"/tmp/visual_base_{task_id}.mp4"
         
+        # Optimized stitcher now handles silence for B-Roll clips automatically
         success = stitch_video_audio_pairs_optimized(final_pairs, temp_visual_path)
         
         if not success: 
