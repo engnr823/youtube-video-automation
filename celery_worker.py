@@ -7,7 +7,7 @@ import uuid
 import shutil
 import subprocess
 import requests
-import traceback  # <--- CRITICAL FIX: Prevents NameError crash
+import traceback
 import re
 from pathlib import Path
 from datetime import timedelta
@@ -41,37 +41,32 @@ if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.
 
 def transform_drive_url(url):
     """Converts a Google Drive 'View' link to a 'Direct Download' link."""
-    # Matches /file/d/ID/view or /file/d/ID
-    match = re.search(r'/file/d/([a-zA-Z0-9_-]+)', url)
-    if match:
-        file_id = match.group(1)
-        # Construct direct download URL
+    patterns = [r'/file/d/([a-zA-Z0-9_-]+)', r'id=([a-zA-Z0-9_-]+)']
+    file_id = None
+    for p in patterns:
+        match = re.search(p, url)
+        if match:
+            file_id = match.group(1)
+            break
+    if file_id:
         return f"https://drive.google.com/uc?export=download&id={file_id}"
     return url
 
 def download_file(url, dest_path):
     """Downloads video from any public link."""
-    # 1. Fix Google Drive Links automatically
     if "drive.google.com" in url:
         download_url = transform_drive_url(url)
-        logging.info(f"🔄 Converted Drive Link to: {download_url}")
     else:
         download_url = url
     
     logging.info(f"⬇️ Downloading: {download_url}")
-    
     try:
-        # User-Agent header helps avoid some 403 Forbidden errors on generic hosts
         headers = {'User-Agent': 'Mozilla/5.0'}
         with requests.get(download_url, stream=True, timeout=300, headers=headers) as r:
-            
-            # Specific check for Google Drive Permission/Virus page
-            if "drive.google.com" in download_url and r.status_code != 200:
-                 raise RuntimeError("⛔ Google Drive Access Denied. Make sure the link is set to 'Anyone with the link'.")
-            
+            if r.status_code in [401, 403]:
+                raise RuntimeError("⛔ Access Denied. Make sure link is Public.")
             if "text/html" in r.headers.get('Content-Type', ''):
-                 raise RuntimeError("⛔ The link returned a Web Page instead of a Video File. Check permissions.")
-
+                 raise RuntimeError("⛔ Link returned HTML page, not video file.")
             r.raise_for_status()
             with open(dest_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
@@ -92,7 +87,6 @@ def get_video_info(file_path):
         info = json.loads(result)['streams'][0]
         return float(info.get('duration', 0)), int(info['width']), int(info['height'])
     except Exception:
-        # Fallback
         return 0.0, 1080, 1920
 
 def format_timestamp(seconds):
@@ -109,7 +103,6 @@ def format_timestamp(seconds):
 # -------------------------------------------------------------------------
 def crop_to_vertical(input_path, output_path):
     logging.info("📐 Auto-Cropping to Vertical (9:16)...")
-    # scale height to 1920, then crop width to 1080 from center
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
         "-vf", "scale=-1:1920,crop=1080:1920:((iw-1080)/2):0,setsar=1",
@@ -121,7 +114,6 @@ def crop_to_vertical(input_path, output_path):
 def remove_silence(input_path, output_path, db_threshold=-30, min_silence_duration=0.6):
     logging.info("✂️ Processing Jump Cuts...")
     try:
-        # Detect silence
         cmd = ["ffmpeg", "-i", input_path, "-af", f"silencedetect=noise={db_threshold}dB:d={min_silence_duration}", "-f", "null", "-"]
         result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
         
@@ -138,7 +130,6 @@ def remove_silence(input_path, output_path, db_threshold=-30, min_silence_durati
             shutil.copy(input_path, output_path)
             return
 
-        # Build filter to skip silences
         dur, _, _ = get_video_info(input_path)
         filter_complex = ""
         concat_idx = 0
@@ -165,7 +156,6 @@ def remove_silence(input_path, output_path, db_threshold=-30, min_silence_durati
             "-map", "[outv]", "-map", "[outa]", "-c:v", "libx264", output_path
         ], check=True)
     except Exception:
-        # Fallback if silence logic fails: Just use original
         logging.warning("Silence removal failed, using original.")
         shutil.copy(input_path, output_path)
 
@@ -175,7 +165,6 @@ def generate_subtitles(audio_path):
         transcript = openai_client.audio.transcriptions.create(
             model="whisper-1", file=audio_file, response_format="verbose_json"
         )
-    
     srt_content = ""
     full_text = ""
     for i, segment in enumerate(transcript.segments):
@@ -184,31 +173,70 @@ def generate_subtitles(audio_path):
         text = segment.text.strip()
         srt_content += f"{i+1}\n{start} --> {end}\n{text}\n\n"
         full_text += text + " "
-        
     return srt_content, full_text
 
 def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True):
     logging.info("✨ Applying Final Polish...")
     
-    # Style: Yellow Text, Black Outline, Bottom Center
     style = "Alignment=2,MarginV=50,Fontname=Arial,FontSize=24,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=3,Outline=2,Shadow=0,Bold=1"
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     
     filters = []
     
     if blur_watermarks:
-        # Blurs top 150px and bottom 150px
-        filters.append("boxblur=luma_radius=20:luma_power=1:enable='between(y,0,150)+between(y,h-200,h)'")
+        # CRITICAL FIX: The logic for blurring top/bottom was crashing because of unescaped commas.
+        # Fixed logic: Draw a transparent box with boxblur filter.
+        # This uses simple 'gblur' logic instead of complex enable expressions to be safer.
+        # Step 1: Split video. Step 2: Crop Top & Blur. Step 3: Overlay back. 
+        # Actually, simpler is better: 'delogo' or 'gblur' on specific area.
+        # Let's try the safest method: crop -> boxblur -> overlay.
+        # Filter: [0:v]crop=iw:150:0:0,boxblur=10[top];[0:v][top]overlay=0:0[tmp];[0:v]crop=iw:200:0:h-200,boxblur=10[bot];[tmp][bot]overlay=0:H-h
         
-    if os.path.exists(srt_path):
-        filters.append(f"subtitles='{safe_srt}':force_style='{style}'")
+        # Simplified blur filter that is syntax-safe:
+        filters.append("crop=iw:150:0:0,boxblur=10[top];[0:v][top]overlay=0:0[v1];[0:v]crop=iw:200:0:ih-200,boxblur=10[bot];[v1][bot]overlay=0:H-h")
         
-    filter_str = ",".join(filters) if filters else "null"
+    # Since complex filter chain logic above changes stream names [v1], we need a robust approach.
+    # We will use the 'drawbox' to just draw black bars if blur fails, but let's try the 'enable' fix first.
+    # FIX: Single quotes around the expression is key.
     
     cmd = ["ffmpeg", "-y", "-i", input_path]
-    if filter_str != "null":
-        cmd.extend(["-vf", filter_str])
-    cmd.extend(["-c:a", "copy", output_path])
+    
+    # We will build a complex filter string properly
+    complex_filter = ""
+    
+    if blur_watermarks:
+        # Define blur regions safely
+        complex_filter += "[0:v]crop=iw:180:0:0,boxblur=luma_radius=20[top];" \
+                          "[0:v]crop=iw:220:0:ih-220,boxblur=luma_radius=20[bot];" \
+                          "[0:v][top]overlay=0:0[v1];" \
+                          "[v1][bot]overlay=0:H-h"
+        last_stream = "[outv]" # Use implicit output if subtitles added next, otherwise map explicit
+        complex_filter += "[v2]" # Name the final output of blur
+        
+        # Correction: The overlay logic needs to chain properly.
+        # [0:v][top]overlay=0:0[v1]; [v1][bot]overlay=0:H-h[v_blurred]
+        complex_filter = "[0:v]crop=iw:180:0:0,boxblur=20[top];[0:v]crop=iw:220:0:ih-220,boxblur=20[bot];[0:v][top]overlay=0:0[v1];[v1][bot]overlay=0:H-h[v_blurred]"
+        video_map = "[v_blurred]"
+    else:
+        video_map = "0:v"
+
+    if os.path.exists(srt_path):
+        # Chain subtitles onto the blurred video
+        # Note: subtitles filter takes a filename, not a stream. It applies to the video stream.
+        # We need to apply subtitles TO the [v_blurred] stream.
+        if blur_watermarks:
+            complex_filter += f";[v_blurred]subtitles='{safe_srt}':force_style='{style}'[v_final]"
+            video_map = "[v_final]"
+        else:
+            complex_filter = f"subtitles='{safe_srt}':force_style='{style}'[v_final]"
+            video_map = "[v_final]"
+
+    if complex_filter:
+        cmd.extend(["-filter_complex", complex_filter, "-map", video_map, "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy"])
+    else:
+        cmd.extend(["-c", "copy"])
+        
+    cmd.append(output_path)
     
     subprocess.run(cmd, check=True)
 
@@ -221,11 +249,10 @@ def generate_packaging(transcript_text, duration):
         )
         meta = json.loads(res.choices[0].message.content)
         
-        # Generate Thumbnail
         logging.info(f"🎨 Generating Thumbnail: {meta.get('thumbnail_prompt')[:20]}...")
         output = replicate.run(
             "black-forest-labs/flux-schnell",
-            input={"prompt": meta.get('thumbnail_prompt', 'Viral video thumbnail'), "aspect_ratio": "9:16"}
+            input={"prompt": "Cinematic YouTube Thumbnail, " + meta.get('thumbnail_prompt', 'Viral scene'), "aspect_ratio": "9:16"}
         )
         thumb_url = str(output[0])
         return meta, thumb_url
@@ -242,7 +269,6 @@ def process_video_upload(self, form_data: dict):
     temp_dir = f"/tmp/edit_{task_id}"
     os.makedirs(temp_dir, exist_ok=True)
     
-    # Paths
     raw_path = os.path.join(temp_dir, "raw.mp4")
     processed_path = os.path.join(temp_dir, "processed.mp4")
     final_path = os.path.join(temp_dir, "final.mp4")
@@ -280,7 +306,7 @@ def process_video_upload(self, form_data: dict):
             srt_content, transcript_text = generate_subtitles(audio_path)
             with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
             
-        # 5. Final Polish
+        # 5. Final Polish (Blur + Subs)
         update("Applying Polish...")
         apply_final_polish(
             current_video, 
@@ -306,9 +332,7 @@ def process_video_upload(self, form_data: dict):
         }
 
     except Exception as e:
-        error_msg = f"Workflow failed: {str(e)}"
-        # CRITICAL FIX: Log the full error but RETURN it as a success payload so Celery doesn't choke.
-        logging.error(f"Task Exception: {traceback.format_exc()}")
-        return {"status": "error", "message": error_msg}
+        logging.error(f"Task Failed: {traceback.format_exc()}")
+        return {"status": "error", "message": str(e)}
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
