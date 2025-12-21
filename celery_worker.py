@@ -1,3 +1,4 @@
+# file: celery_worker.py
 import os
 import sys
 import logging
@@ -35,41 +36,6 @@ if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.
         secure=True
     )
 
-# ===================================================================
-# --- 🧠 SYSTEM PROMPTS V4.0
-# ===================================================================
-
-SEO_METADATA_PROMPT = """
-# --- SYSTEM PROMPT V4.0 — SENIOR YOUTUBE SEO STRATEGIST
-You are a Senior YouTube Growth Strategist.
-Goal: Maximize CTR and SEO.
-
-# --- INPUT CONTEXT
-VIDEO TYPE: ${video_type}
-SCRIPT CONTEXT: ${transcript}
-
-# --- OPTIMIZATION RULES
-1. TITLE: [Primary Keyword] + [Power Word]. If "reel", add #Shorts. Max 60 chars.
-2. DESCRIPTION: Hook (2 sentences) + Deep Dive (100 words) + Tags.
-3. TAGS: Broad + Exact + Long-Tail.
-
-# --- OUTPUT SCHEMA (JSON)
-{
-  "title": "Optimized Title #Shorts",
-  "description": "Full description...",
-  "tags": ["tag1", "tag2"],
-  "primary_keyword": "keyword"
-}
-"""
-
-THUMBNAIL_ARTIST_PROMPT = """
-# --- SYSTEM PROMPT V4.0 — THUMBNAIL ARTIST
-Write ONE detailed text-to-image prompt for Flux AI based on: ${context}
-Focus on: High Emotion (Fear/Joy), Cinematic Lighting (Rembrandt), 8k texture.
-Negative: No text, no blurry, no cartoon.
-Output ONLY the prompt text.
-"""
-
 # -------------------------------------------------------------------------
 # 🛠️ HELPER FUNCTIONS
 # -------------------------------------------------------------------------
@@ -87,17 +53,11 @@ def transform_drive_url(url):
     return url
 
 def download_file(url, dest_path):
-    if "drive.google.com" in url:
-        download_url = transform_drive_url(url)
-    else:
-        download_url = url
-    
+    download_url = transform_drive_url(url) if "drive.google.com" in url else url
     logging.info(f"⬇️ Downloading: {download_url}")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         with requests.get(download_url, stream=True, timeout=300, headers=headers) as r:
-            if r.status_code in [401, 403]:
-                raise RuntimeError("⛔ Access Denied. Public links only.")
             r.raise_for_status()
             with open(dest_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
@@ -127,7 +87,6 @@ def format_timestamp(seconds):
 def ensure_font(temp_dir):
     font_path = os.path.join(temp_dir, "Arial.ttf")
     if not os.path.exists(font_path):
-        logging.info("📥 Downloading Portable Font (Arial)...")
         url = "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial.ttf"
         try:
             r = requests.get(url, timeout=10)
@@ -146,17 +105,13 @@ def crop_to_vertical_force(input_path, output_path):
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
         "-vf", "scale=-1:1920,crop=1080:1920:((iw-1080)/2):0,setsar=1",
-        "-c:v", "libx264", "-crf", "23", "-preset", "fast",
-        "-c:a", "copy",
+        "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-c:a", "copy",
         output_path
     ]
     subprocess.run(cmd, check=True)
 
-def remove_silence_optimized(input_path, output_path):
-    shutil.copy(input_path, output_path)
-
 def generate_subtitles_english(audio_path):
-    logging.info("🎙️ Transcribing & Translating to English...")
+    logging.info("🎙️ AI Transcribing...")
     with open(audio_path, "rb") as audio_file:
         transcript = openai_client.audio.translations.create(
             model="whisper-1", file=audio_file, response_format="verbose_json"
@@ -171,46 +126,51 @@ def generate_subtitles_english(audio_path):
         full_text += text + " "
     return srt_content, full_text
 
-def apply_final_polish_v6(input_path, srt_path, font_path, output_path, channel_name, blur_watermarks=True, is_vertical=True):
-    logging.info(f"✨ Applying Final Polish (Branding: {channel_name})...")
+def apply_final_polish_v7(input_path, srt_path, font_path, output_path, channel_name, blur_watermarks=True, is_vertical=True):
+    """
+    V7 GOLDEN FIX:
+    - Subtitles exactly above branding.
+    - Subtitle Size: 20px (Requested).
+    - Branding: Dynamic user input.
+    """
+    logging.info(f"✨ Rendering V7 (Branding: {channel_name})...")
     
-    # 1. Prepare Paths
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     font_dir = os.path.dirname(font_path).replace("\\", "/").replace(":", "\\:")
     safe_font_path = font_path.replace("\\", "/").replace(":", "\\:")
     
-    # 2. Escape Branding text
-    safe_channel = channel_name.replace(":", "\\:").replace("'", "")
+    # 1. Channel Branding Positioning
+    safe_brand = channel_name.replace(":", "\\:").replace("'", "")
 
-    # 3. Subtitle Style (Lower Position for 7% blur area)
-    # MarginV=80 puts it right above the very bottom
-    # FontSize=65 is standard large for 1080p
+    # 2. Subtitle Style Logic
+    # MarginV=50 puts text in the bottom blur area.
+    # FontSize=20 as requested.
     if is_vertical:
-        style = "FontName=Arial,Alignment=2,MarginV=80,FontSize=65,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
-        brand_size = 35
-        brand_y = "h-th-15" # 15px from the absolute bottom
+        sub_style = "FontName=Arial,Alignment=2,MarginV=50,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+        brand_size = 24
+        brand_y = "h-th-15" # 15px from very bottom
     else:
-        style = "FontName=Arial,Alignment=2,MarginV=40,FontSize=40,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
-        brand_size = 20
+        sub_style = "FontName=Arial,Alignment=2,MarginV=30,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Bold=1"
+        brand_size = 18
         brand_y = "h-th-10"
 
     cmd = ["ffmpeg", "-y", "-i", input_path]
     filter_chain = []
     last_label = "0:v"
 
-    # 4. Blur Watermarks (Only 7% at bottom as requested)
+    # 3. Blur (7% at bottom)
     if blur_watermarks and is_vertical:
         filter_chain.append(f"[{last_label}]crop=iw:ih*0.07:0:ih*0.93,boxblur=luma_radius=20[bot_blur]")
         filter_chain.append(f"[{last_label}][bot_blur]overlay=0:H-h[v_blurred]")
         last_label = "v_blurred"
 
-    # 5. Add Branding Layer (Channel Name)
-    filter_chain.append(f"[{last_label}]drawtext=fontfile='{safe_font_path}':text='{safe_channel}':fontcolor=white@0.8:fontsize={brand_size}:x=(w-text_w)/2:y={brand_y}:shadowcolor=black:shadowx=1:shadowy=1[v_branded]")
+    # 4. Burn Branding Layer
+    filter_chain.append(f"[{last_label}]drawtext=fontfile='{safe_font_path}':text='{safe_brand}':fontcolor=white:fontsize={brand_size}:x=(w-text_w)/2:y={brand_y}:shadowcolor=black:shadowx=1:shadowy=1[v_branded]")
     last_label = "v_branded"
 
-    # 6. Burn Subtitles
+    # 5. Burn Subtitles Layer (Using fontsdir to ensure Arial loads)
     if os.path.exists(srt_path):
-        filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{style}'[v_final]")
+        filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{sub_style}'[v_final]")
         last_label = "v_final"
 
     if filter_chain:
@@ -222,21 +182,6 @@ def apply_final_polish_v6(input_path, srt_path, font_path, output_path, channel_
     cmd.append(output_path)
     subprocess.run(cmd, check=True)
 
-def generate_packaging_v4(transcript_text, duration, output_format="9:16"):
-    logging.info("📦 Generating V4.0 Packaging...")
-    is_short = (output_format == "9:16")
-    video_type_str = "reel" if is_short else "youtube"
-    try:
-        formatted_prompt = Template(SEO_METADATA_PROMPT).safe_substitute(video_type=video_type_str, transcript=transcript_text[:2000])
-        res = openai_client.chat.completions.create(model="gpt-4o", messages=[{"role":"user", "content": formatted_prompt}], response_format={"type": "json_object"})
-        meta = json.loads(res.choices[0].message.content)
-        context_data = meta.get('description', transcript_text[:500])
-        thumb_gen_prompt = Template(THUMBNAIL_ARTIST_PROMPT).safe_substitute(context=context_data)
-        output = replicate.run("black-forest-labs/flux-schnell", input={"prompt": thumb_gen_prompt + ", photorealistic, 8k", "aspect_ratio": "9:16" if is_short else "16:9"})
-        return meta, str(output[0])
-    except Exception:
-        return {"title": "Viral Edit #Shorts", "description": "", "tags": []}, None
-
 # -------------------------------------------------------------------------
 # 🏭 MAIN TASK
 # -------------------------------------------------------------------------
@@ -247,7 +192,6 @@ def process_video_upload(self, form_data: dict):
     os.makedirs(temp_dir, exist_ok=True)
     
     raw_path = os.path.join(temp_dir, "raw.mp4")
-    cropped_path = os.path.join(temp_dir, "cropped.mp4")
     processed_path = os.path.join(temp_dir, "processed.mp4")
     final_path = os.path.join(temp_dir, "final.mp4")
     audio_path = os.path.join(temp_dir, "audio.mp3")
@@ -257,7 +201,7 @@ def process_video_upload(self, form_data: dict):
         def update(msg): self.update_state(state="PROGRESS", meta={"message": msg})
         
         font_path = ensure_font(temp_dir)
-        update("Downloading Media...")
+        update("Downloading video...")
         download_file(form_data['video_url'], raw_path)
         dur, w, h = get_video_info(raw_path)
         
@@ -265,52 +209,47 @@ def process_video_upload(self, form_data: dict):
         is_landscape = w > h
         is_vertical_output = (target_format == '9:16')
         
-        # CAPTURE DYNAMIC CHANNEL NAME FROM FORM
-        user_channel = form_data.get('channel_name', '@ViralShorts')
+        # Capture the BRANDING name from the form
+        user_brand = form_data.get('channel_name', '@ViralShorts')
         
         current_video = raw_path
 
-        # FORCE CROP
+        # FORCE CROP if needed
         if target_format == '9:16' and is_landscape:
-            update("Formatting to Vertical...")
-            crop_to_vertical_force(raw_path, cropped_path)
-            current_video = cropped_path
+            update("Formatting Vertical...")
+            crop_to_vertical_force(raw_path, processed_path)
+            current_video = processed_path
             is_landscape = False 
-
-        remove_silence_optimized(current_video, processed_path)
-        current_video = processed_path
         
-        transcript_text = "Video Content"
+        # Transcription
         srt_exists = False
         if form_data.get('add_subtitles') == 'true':
-            update("AI Captioning...")
+            update("Generating Captions...")
             subprocess.run(["ffmpeg", "-y", "-i", current_video, "-q:a", "0", "-map", "a", audio_path], check=True)
-            srt_content, transcript_text = generate_subtitles_english(audio_path)
+            srt_content, _ = generate_subtitles_english(audio_path)
             if len(srt_content) > 10:
                 with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
                 srt_exists = True
             
-        # APPLY POLISH (V6)
-        update("Applying Polish...")
-        apply_final_polish_v6(
+        # Final Render Pass (V7)
+        update("Final Rendering...")
+        apply_final_polish_v7(
             current_video, 
             srt_path if srt_exists else None,
             font_path,
             final_path,
-            channel_name=user_channel,
+            channel_name=user_brand,
             blur_watermarks=(form_data.get('blur_watermarks') == 'true'),
             is_vertical=is_vertical_output
         )
         
-        meta, thumb_url = generate_packaging_v4(transcript_text, dur, target_format)
-        update("Finalizing...")
+        update("Uploading...")
         cloud_res = cloudinary.uploader.upload(final_path, folder="viral_edits", resource_type="video")
         
         return {
             "status": "success",
             "video_url": cloud_res.get("secure_url"),
-            "thumbnail_url": thumb_url,
-            "metadata": meta,
+            "metadata": {"title": "Edited Video #Shorts"},
             "transcript_srt": srt_content if srt_exists else None
         }
 
