@@ -124,29 +124,6 @@ def format_timestamp(seconds):
     millis = int(td.microseconds / 1000)
     return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
-def install_system_font():
-    """
-    NUCLEAR OPTION: Installs font to the SYSTEM font directory (~/.fonts).
-    This forces FFmpeg to find it automatically without config hacks.
-    """
-    home = os.path.expanduser("~")
-    font_dir = os.path.join(home, ".fonts")
-    os.makedirs(font_dir, exist_ok=True)
-    
-    font_path = os.path.join(font_dir, "Roboto-Bold.ttf")
-    if not os.path.exists(font_path):
-        logging.info(f"📥 Installing System Font to {font_path}...")
-        url = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
-        try:
-            r = requests.get(url, timeout=10)
-            with open(font_path, 'wb') as f:
-                f.write(r.content)
-            # Try to refresh font cache if fc-cache exists
-            subprocess.run(["fc-cache", "-f", "-v"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except:
-            logging.warning("Font installation failed.")
-    return "Roboto-Bold" # Return the Font Name, not path
-
 # -------------------------------------------------------------------------
 # ✂️ VIDEO PROCESSING
 # -------------------------------------------------------------------------
@@ -212,6 +189,7 @@ def remove_silence_optimized(input_path, output_path, db_threshold=-30, min_sile
 
 def generate_subtitles_english(audio_path):
     logging.info("🎙️ Transcribing & Translating to English...")
+    # NOTE: 'translations' endpoint forces English output
     with open(audio_path, "rb") as audio_file:
         transcript = openai_client.audio.translations.create(
             model="whisper-1", file=audio_file, response_format="verbose_json"
@@ -226,34 +204,34 @@ def generate_subtitles_english(audio_path):
         full_text += text + " "
     return srt_content, full_text
 
-def apply_polish_with_system_font(input_path, srt_path, output_path, blur_watermarks=True, is_vertical=True):
+def apply_simple_polish(input_path, srt_path, output_path, blur_watermarks=True, is_vertical=True):
     """
-    Applies Blur + Subtitles using the INSTALLED SYSTEM FONT.
-    This avoids the 'Error opening memory font' crash.
+    Applies Polish using the 'Old School' method that works on broken Linux systems.
+    NO FontName or FontFile is specified to avoid crashing 'fontconfig'.
     """
-    logging.info(f"✨ Applying Polish (Blur + Subs)...")
+    logging.info(f"✨ Applying Simple Polish (No-Font-Config Mode)...")
     
-    # 1. Escape SRT Path
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     
-    # 2. Style (No FontFile, just FontName)
-    # We rely on 'fc-cache' having found Roboto-Bold
+    # --- STYLE SETTINGS (The "Old Code" Logic) ---
+    # We DO NOT specify FontName. We let FFmpeg use its internal default (DejaVuSans).
+    # We DO set MarginV=550 to keep it in the safe zone.
     if is_vertical:
-        style = "FontName=Roboto-Bold,Alignment=2,MarginV=550,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
+        style = "Alignment=2,MarginV=550,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
     else:
-        style = "FontName=Roboto-Bold,Alignment=2,MarginV=80,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+        style = "Alignment=2,MarginV=80,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
 
     cmd = ["ffmpeg", "-y", "-i", input_path]
     filter_chain = []
     last_label = "0:v"
 
-    # 3. Blur Watermarks
+    # 1. Blur Watermarks
     if blur_watermarks and is_vertical:
         filter_chain.append(f"[{last_label}]crop=iw:ih*0.10:0:ih*0.90,boxblur=luma_radius=20[bot_blur]")
         filter_chain.append(f"[{last_label}][bot_blur]overlay=0:H-h[v_blurred]")
         last_label = "v_blurred"
 
-    # 4. Burn Subtitles
+    # 2. Burn Subtitles (Standard 'subtitles' filter, no fontsdir)
     if os.path.exists(srt_path):
         filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':force_style='{style}'[v_final]")
         last_label = "v_final"
@@ -330,9 +308,7 @@ def process_video_upload(self, form_data: dict):
     try:
         def update(msg): self.update_state(state="PROGRESS", meta={"message": msg})
         
-        # 1. SETUP: Install Font System-Wide (Nuclear Fix)
-        install_system_font() 
-        
+        # 1. Ingest
         update("Downloading Video...")
         download_file(form_data['video_url'], raw_path)
         dur, w, h = get_video_info(raw_path)
@@ -343,7 +319,7 @@ def process_video_upload(self, form_data: dict):
         
         current_video = raw_path
 
-        # 2. FORCE CROP
+        # 2. FORCE CROP (Guarantees 9:16)
         if target_format == '9:16' and is_landscape:
             update("Cropping to Vertical...")
             crop_to_vertical_force(raw_path, cropped_path)
@@ -358,7 +334,7 @@ def process_video_upload(self, form_data: dict):
             remove_silence_optimized(current_video, processed_path)
             current_video = processed_path
         
-        # 4. Transcription
+        # 4. Transcription (English)
         transcript_text = "Video Content"
         srt_exists = False
         if form_data.get('add_subtitles') == 'true':
@@ -366,16 +342,13 @@ def process_video_upload(self, form_data: dict):
             subprocess.run(["ffmpeg", "-y", "-i", current_video, "-q:a", "0", "-map", "a", audio_path], check=True)
             srt_content, transcript_text = generate_subtitles_english(audio_path)
             
-            # Sanity Check
             if len(srt_content) > 10:
                 with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
                 srt_exists = True
-            else:
-                logging.error("Transcript too short, skipping subtitles.")
             
-        # 5. Final Polish (Using System Font)
+        # 5. Final Polish (Using Simple Style - No Font Config Crash)
         update("Applying Polish...")
-        apply_polish_with_system_font(
+        apply_simple_polish(
             current_video, 
             srt_path if srt_exists else None,
             final_path,
