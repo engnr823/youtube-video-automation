@@ -1,4 +1,3 @@
-# file: celery_worker.py
 import os
 import sys
 import logging
@@ -127,20 +126,18 @@ def format_timestamp(seconds):
 
 def ensure_font(temp_dir):
     """
-    Downloads a reliable .ttf font (Arial or Roboto) to the temp directory.
-    This guarantees FFmpeg has a font to use for subtitles.
+    Downloads Arial.ttf.
     """
     font_path = os.path.join(temp_dir, "Arial.ttf")
     if not os.path.exists(font_path):
         logging.info("📥 Downloading Portable Font (Arial)...")
-        # Using a reliable Github raw link for Arial or equivalent
         url = "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial.ttf"
         try:
             r = requests.get(url, timeout=10)
             with open(font_path, 'wb') as f:
                 f.write(r.content)
         except:
-            logging.warning("Font download failed. Subtitles might fail.")
+            logging.warning("Font download failed.")
     return font_path
 
 # -------------------------------------------------------------------------
@@ -223,24 +220,21 @@ def generate_subtitles_english(audio_path):
     return srt_content, full_text
 
 def apply_final_polish_with_font(input_path, srt_path, font_path, output_path, blur_watermarks=True, is_vertical=True):
-    """
-    Applies Blur + Subtitles using a LOCAL FONT FILE to bypass broken system fonts.
-    We pass the folder containing the font to 'fontsdir' and reference the font by name.
-    """
-    logging.info(f"✨ Applying Final Polish (Local Font)...")
+    logging.info(f"✨ Applying Final Polish (BIG Subtitles)...")
     
-    # 1. Prepare Paths (Escape special chars for FFmpeg)
+    # 1. Prepare Paths
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-    
-    # Get the directory of the font
+    # Get directory of the font for fontsdir
     font_dir = os.path.dirname(font_path).replace("\\", "/").replace(":", "\\:")
     
-    # 2. Style Settings (Explicitly use 'Arial' which matches the file we downloaded)
-    # We use MarginV=550 for vertical (Safe Zone)
+    # 2. Viral Style Settings (UPDATED SIZE)
+    # FontSize=75 (Large and visible on 1080p)
+    # Outline=4 (Thick black border)
+    # MarginV=280 (Lower middle safe zone, not too high, not too low)
     if is_vertical:
-        style = "FontName=Arial,Alignment=2,MarginV=550,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
+        style = "FontName=Arial,Alignment=2,MarginV=280,FontSize=75,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=4,Shadow=0,Bold=1"
     else:
-        style = "FontName=Arial,Alignment=2,MarginV=80,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+        style = "FontName=Arial,Alignment=2,MarginV=60,FontSize=45,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
 
     cmd = ["ffmpeg", "-y", "-i", input_path]
     filter_chain = []
@@ -254,8 +248,6 @@ def apply_final_polish_with_font(input_path, srt_path, font_path, output_path, b
 
     # 4. Burn Subtitles (WITH FONTSDIR)
     if os.path.exists(srt_path):
-        # We add 'fontsdir' parameter pointing to our temp folder.
-        # This forces libass to scan that folder for 'Arial.ttf'
         filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{style}'[v_final]")
         last_label = "v_final"
 
@@ -331,7 +323,7 @@ def process_video_upload(self, form_data: dict):
     try:
         def update(msg): self.update_state(state="PROGRESS", meta={"message": msg})
         
-        # 1. SETUP: Download Font (Arial)
+        # 1. SETUP: Download Font
         font_path = ensure_font(temp_dir)
         
         update("Downloading Video...")
@@ -371,12 +363,12 @@ def process_video_upload(self, form_data: dict):
                 with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
                 srt_exists = True
             
-        # 5. Final Polish (Using Portable Font)
+        # 5. Final Polish (BIG SIZE)
         update("Applying Polish...")
         apply_final_polish_with_font(
             current_video, 
             srt_path if srt_exists else None,
-            font_path, # Pass the downloaded Arial.ttf path
+            font_path,
             final_path,
             blur_watermarks=(form_data.get('blur_watermarks') == 'true'),
             is_vertical=is_vertical_output
