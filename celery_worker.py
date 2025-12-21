@@ -101,6 +101,7 @@ def format_timestamp(seconds):
 # -------------------------------------------------------------------------
 # ✂️ VIDEO PROCESSING FUNCTIONS
 # -------------------------------------------------------------------------
+
 def crop_to_vertical(input_path, output_path):
     logging.info("📐 Auto-Cropping to Vertical (9:16)...")
     cmd = [
@@ -175,45 +176,60 @@ def generate_subtitles(audio_path):
         full_text += text + " "
     return srt_content, full_text
 
-def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True):
-    logging.info("✨ Applying Final Polish...")
+def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True, is_vertical=True):
+    logging.info(f"✨ Applying Final Polish (Vertical: {is_vertical})...")
     
-    # Updated Style: No opaque box (BorderStyle=1), Yellow Text.
-    style = "Alignment=2,MarginV=50,FontSize=24,PrimaryColour=&H00FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
-    safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
+    # --- STYLE SETTINGS ---
+    # 1. Fontname='Noto Sans': Uses the fonts installed via nixpacks to fix square boxes
+    # 2. BorderStyle=1: Outline mode (removes ugly box)
+    # 3. MarginV: Adjusted based on format (Higher for vertical to sit on blur)
     
-    cmd = ["ffmpeg", "-y", "-i", input_path]
-    filter_chain = ""
-    
-    # Track the current video stream name. Starts as '0:v'.
-    current_stream = "0:v"
-    
-    if blur_watermarks:
-        # Blur Top & Bottom
-        filter_chain += f"[{current_stream}]crop=iw:180:0:0,boxblur=20[top];" \
-                        f"[{current_stream}]crop=iw:220:0:ih-220,boxblur=20[bot];" \
-                        f"[{current_stream}][top]overlay=0:0[v1];" \
-                        f"[v1][bot]overlay=0:H-h[v_blurred]"
-        current_stream = "v_blurred" # Update pointer (no brackets here for logic)
+    if is_vertical:
+        # Bottom Center, Lifted up to sit in the 15% blur zone
+        style = "Alignment=2,MarginV=50,Fontname=Noto Sans,FontSize=24,PrimaryColour=&H00FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+    else:
+        # Smaller font for landscape
+        style = "Alignment=2,MarginV=30,Fontname=Noto Sans,FontSize=16,PrimaryColour=&H00FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Bold=1"
 
+    safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
+    cmd = ["ffmpeg", "-y", "-i", input_path]
+    
+    filter_chain = ""
+    map_v = "0:v"
+    
+    # --- BLUR LOGIC (Bottom 15% Only) ---
+    # Only applies to Vertical Shorts to hide TikTok/Reels UI
+    if blur_watermarks and is_vertical:
+        # Crop bottom 15% -> Blur -> Overlay back at bottom
+        filter_chain += f"[{map_v}]crop=iw:ih*0.15:0:ih*(1-0.15),boxblur=luma_radius=20[bot_blur];" \
+                        f"[{map_v}][bot_blur]overlay=0:H-h[v_blurred]"
+        map_v = "[v_blurred]" # Update pointer to the blurred stream (Use brackets for input reference later)
+        # Note: When used in next step string, we strip brackets if needed, but here let's keep clean variables.
+        # Actually for 'filter_chain' appending, we need to refer to [v_blurred].
+        
+        # Clean variable for next step
+        current_stream_name = "v_blurred"
+    else:
+        current_stream_name = "0:v"
+
+    # --- SUBTITLE LOGIC ---
     if os.path.exists(srt_path):
         if filter_chain:
-            # Chain it: Add separator and use the LAST stream created
-            filter_chain += f";[{current_stream}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
+            # Chain exists, append separator
+            filter_chain += f";[{current_stream_name}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
         else:
-            # Start chain if empty
-            filter_chain += f"[{current_stream}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
+            # Start new chain
+            filter_chain = f"[{current_stream_name}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
         
-        current_stream = "v_final"
+        current_stream_name = "v_final"
 
+    # --- EXECUTE ---
     if filter_chain:
-        # Map the final stream pointer (add brackets now for mapping)
-        cmd.extend(["-filter_complex", filter_chain, "-map", f"[{current_stream}]", "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy"])
+        cmd.extend(["-filter_complex", filter_chain, "-map", f"[{current_stream_name}]", "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy"])
     else:
         cmd.extend(["-c", "copy"])
         
     cmd.append(output_path)
-    
     subprocess.run(cmd, check=True)
 
 def generate_packaging(transcript_text, duration):
@@ -267,15 +283,24 @@ def process_video_upload(self, form_data: dict):
         download_file(form_data['video_url'], raw_path)
         
         dur, w, h = get_video_info(raw_path)
+        
+        # Determine Format
+        target_format = form_data.get('output_format', '9:16')
         is_landscape = w > h
+        
         current_video = raw_path
         
-        # 2. Crop
-        if is_landscape:
-            update("Auto-Cropping to Vertical...")
+        # 2. Smart Format Logic
+        # If Target is 9:16 AND Video is Landscape -> CROP
+        if target_format == '9:16' and is_landscape:
+            update("Converting to Vertical (9:16)...")
             crop_to_vertical(raw_path, processed_path)
             current_video = processed_path
-        
+            is_vertical_output = True
+        else:
+            # If Target is 16:9, OR Video is already Vertical -> Keep Original
+            is_vertical_output = (target_format == '9:16')
+            
         # 3. Silence Removal
         if form_data.get('remove_silence') == 'true':
             update("Removing Silence...")
@@ -296,7 +321,8 @@ def process_video_upload(self, form_data: dict):
             current_video, 
             srt_path if form_data.get('add_subtitles') == 'true' else None,
             final_path,
-            blur_watermarks=(form_data.get('blur_watermarks') == 'true')
+            blur_watermarks=(form_data.get('blur_watermarks') == 'true'),
+            is_vertical=is_vertical_output
         )
         
         # 6. Packaging
