@@ -125,11 +125,16 @@ def format_timestamp(seconds):
     return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
 def ensure_font(temp_dir):
-    """Downloads a font to ensure Subtitles work on Railway."""
-    font_path = os.path.join(temp_dir, "Roboto-Bold.ttf")
+    """
+    Downloads Roboto-Bold.ttf to a dedicated 'fonts' folder.
+    This is required for the 'fontsdir' FFmpeg parameter.
+    """
+    font_dir = os.path.join(temp_dir, "fonts")
+    os.makedirs(font_dir, exist_ok=True)
+    font_path = os.path.join(font_dir, "Roboto-Bold.ttf")
+    
     if not os.path.exists(font_path):
         logging.info("📥 Downloading Font for Subtitles...")
-        # Using a reliable CDN for Roboto Bold
         url = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
         try:
             r = requests.get(url, timeout=10)
@@ -137,7 +142,7 @@ def ensure_font(temp_dir):
                 f.write(r.content)
         except:
             logging.warning("Font download failed. Subtitles might fail.")
-    return font_path
+    return font_dir, font_path # Return directory AND path
 
 # -------------------------------------------------------------------------
 # ✂️ VIDEO PROCESSING
@@ -146,7 +151,6 @@ def ensure_font(temp_dir):
 def crop_to_vertical_force(input_path, output_path):
     """Forces video to 9:16 (Vertical) separately to guarantee aspect ratio."""
     logging.info("📐 Force Cropping to Vertical (9:16)...")
-    # scale height to 1920, keep aspect, then crop center 1080
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
         "-vf", "scale=-1:1920,crop=1080:1920:((iw-1080)/2):0,setsar=1",
@@ -220,38 +224,39 @@ def generate_subtitles_english(audio_path):
         full_text += text + " "
     return srt_content, full_text
 
-def apply_polish_with_font(input_path, srt_path, font_path, output_path, blur_watermarks=True, is_vertical=True):
+def apply_polish_with_font(input_path, srt_path, font_dir, output_path, blur_watermarks=True, is_vertical=True):
     """
-    Applies Blur + Subtitles using a SPECIFIC FONT FILE to fix missing system fonts.
+    Applies Blur + Subtitles.
+    CRITICAL FIX: Uses 'fontsdir' to bypass broken system font configs.
     """
-    logging.info(f"✨ Applying Polish (Blur + Subs)... Font: {font_path}")
     
-    # 
+
+    logging.info(f"✨ Applying Polish (Blur + Subs)... Fonts Dir: {font_dir}")
     
-    # 1. Escape Paths for FFmpeg (CRITICAL)
+    # Escape Paths
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-    safe_font = font_path.replace("\\", "/").replace(":", "\\:")
+    safe_font_dir = font_dir.replace("\\", "/").replace(":", "\\:")
     
-    # 2. Define Style with FontFile
-    # We use MarginV=550 for vertical to keep it in the "Safe Zone" (Upper Lower Third)
+    # Style: Fontname must match the Internal Name of the TTF (Roboto Bold)
     if is_vertical:
-        style = f"Fontname=Roboto,FontFile='{safe_font}',Alignment=2,MarginV=550,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
+        style = "Fontname=Roboto Bold,Alignment=2,MarginV=550,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
     else:
-        style = f"Fontname=Roboto,FontFile='{safe_font}',Alignment=2,MarginV=80,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+        style = "Fontname=Roboto Bold,Alignment=2,MarginV=80,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
 
     cmd = ["ffmpeg", "-y", "-i", input_path]
     filter_chain = []
     last_label = "0:v"
 
-    # 3. Blur Watermarks (Bottom 10%)
+    # 1. Blur Watermarks (Bottom 10%)
     if blur_watermarks and is_vertical:
         filter_chain.append(f"[{last_label}]crop=iw:ih*0.10:0:ih*0.90,boxblur=luma_radius=20[bot_blur]")
         filter_chain.append(f"[{last_label}][bot_blur]overlay=0:H-h[v_blurred]")
         last_label = "v_blurred"
 
-    # 4. Burn Subtitles
+    # 2. Burn Subtitles (Using fontsdir)
     if os.path.exists(srt_path):
-        filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':force_style='{style}'[v_final]")
+        # We add 'fontsdir' here. FFmpeg will scan this folder for 'Roboto Bold'.
+        filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':fontsdir='{safe_font_dir}':force_style='{style}'[v_final]")
         last_label = "v_final"
 
     if filter_chain:
@@ -292,7 +297,6 @@ def generate_packaging_v4(transcript_text, duration, output_format="9:16"):
             messages=[{"role":"user", "content": thumb_gen_prompt}]
         )
         flux_prompt = res_thumb.choices[0].message.content.strip()
-        logging.info(f"🎨 Flux Prompt: {flux_prompt[:50]}...")
         
         flux_aspect = "9:16" if is_short else "16:9"
         output = replicate.run(
@@ -318,7 +322,7 @@ def process_video_upload(self, form_data: dict):
     
     # Paths
     raw_path = os.path.join(temp_dir, "raw.mp4")
-    cropped_path = os.path.join(temp_dir, "cropped.mp4") # New Intermediate
+    cropped_path = os.path.join(temp_dir, "cropped.mp4")
     processed_path = os.path.join(temp_dir, "processed.mp4")
     final_path = os.path.join(temp_dir, "final.mp4")
     audio_path = os.path.join(temp_dir, "audio.mp3")
@@ -327,8 +331,8 @@ def process_video_upload(self, form_data: dict):
     try:
         def update(msg): self.update_state(state="PROGRESS", meta={"message": msg})
         
-        # 1. SETUP: Download Font & Video
-        font_path = ensure_font(temp_dir) # <--- CRITICAL FIX 1
+        # 1. SETUP: Download Font (Get Directory)
+        font_dir, font_path = ensure_font(temp_dir) # Returns dir and path
         update("Downloading Video...")
         download_file(form_data['video_url'], raw_path)
         dur, w, h = get_video_info(raw_path)
@@ -339,16 +343,14 @@ def process_video_upload(self, form_data: dict):
         
         current_video = raw_path
 
-        # 2. FORCE CROP (Guarantees 9:16 Output) <--- CRITICAL FIX 2
+        # 2. FORCE CROP
         if target_format == '9:16' and is_landscape:
             update("Cropping to Vertical...")
             crop_to_vertical_force(raw_path, cropped_path)
             current_video = cropped_path
-            # Update info since dimensions changed
             _, w, h = get_video_info(current_video)
             is_landscape = False 
         elif target_format == '9:16' and not is_landscape:
-            # Already vertical, keep using raw
             pass
 
         # 3. Silence Removal
@@ -364,15 +366,22 @@ def process_video_upload(self, form_data: dict):
             update("Transcribing...")
             subprocess.run(["ffmpeg", "-y", "-i", current_video, "-q:a", "0", "-map", "a", audio_path], check=True)
             srt_content, transcript_text = generate_subtitles_english(audio_path)
+            
+            # DEBUG LOG: Verify SRT is not empty
+            if len(srt_content) < 10:
+                logging.error("SRT Content is suspiciously short/empty!")
+            else:
+                logging.info(f"SRT Content Generated ({len(srt_content)} chars)")
+                
             with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
             srt_exists = True
             
-        # 5. Final Polish (Blur + Subs with Explicit Font)
+        # 5. Final Polish (Using fontsdir)
         update("Applying Polish...")
         apply_polish_with_font(
             current_video, 
             srt_path if srt_exists else None,
-            font_path, # Passing font file
+            font_dir, # Passing DIRECTORY, not file
             final_path,
             blur_watermarks=(form_data.get('blur_watermarks') == 'true'),
             is_vertical=is_vertical_output
