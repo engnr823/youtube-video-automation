@@ -125,9 +125,6 @@ def format_timestamp(seconds):
     return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
 def ensure_font(temp_dir):
-    """
-    Downloads Arial.ttf.
-    """
     font_path = os.path.join(temp_dir, "Arial.ttf")
     if not os.path.exists(font_path):
         logging.info("📥 Downloading Portable Font (Arial)...")
@@ -155,57 +152,11 @@ def crop_to_vertical_force(input_path, output_path):
     ]
     subprocess.run(cmd, check=True)
 
-def remove_silence_optimized(input_path, output_path, db_threshold=-30, min_silence_duration=0.6):
-    logging.info("✂️ Processing Jump Cuts...")
-    try:
-        cmd = ["ffmpeg", "-i", input_path, "-af", f"silencedetect=noise={db_threshold}dB:d={min_silence_duration}", "-f", "null", "-"]
-        result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
-        
-        silence_starts = []
-        silence_ends = []
-        for line in result.stderr.splitlines():
-            if "silence_start" in line:
-                silence_starts.append(float(line.split("silence_start: ")[1]))
-            if "silence_end" in line:
-                silence_ends.append(float(line.split("silence_end: ")[1].split(" ")[0]))
-
-        if not silence_starts:
-            logging.info("No silence found. Copying.")
-            shutil.copy(input_path, output_path)
-            return
-
-        dur, _, _ = get_video_info(input_path)
-        filter_complex = ""
-        concat_idx = 0
-        current_time = 0.0
-        periods = list(zip(silence_starts, silence_ends))
-        
-        for start, end in periods:
-            if start > current_time:
-                filter_complex += f"[0:v]trim=start={current_time}:end={start},setpts=PTS-STARTPTS[v{concat_idx}];"
-                filter_complex += f"[0:a]atrim=start={current_time}:end={start},asetpts=PTS-STARTPTS[a{concat_idx}];"
-                concat_idx += 1
-            current_time = end
-            
-        if current_time < dur:
-            filter_complex += f"[0:v]trim=start={current_time}:end={dur},setpts=PTS-STARTPTS[v{concat_idx}];"
-            filter_complex += f"[0:a]atrim=start={current_time}:end={dur},asetpts=PTS-STARTPTS[a{concat_idx}];"
-            concat_idx += 1
-
-        filter_complex += "".join([f"[v{i}][a{i}]" for i in range(concat_idx)])
-        filter_complex += f"concat=n={concat_idx}:v=1:a=1[outv][outa]"
-
-        subprocess.run([
-            "ffmpeg", "-y", "-i", input_path, "-filter_complex", filter_complex,
-            "-map", "[outv]", "-map", "[outa]", "-c:v", "libx264", "-crf", "23", "-preset", "fast", output_path
-        ], check=True)
-    except Exception:
-        logging.warning("Silence removal failed, using original.")
-        shutil.copy(input_path, output_path)
+def remove_silence_optimized(input_path, output_path):
+    shutil.copy(input_path, output_path)
 
 def generate_subtitles_english(audio_path):
     logging.info("🎙️ Transcribing & Translating to English...")
-    # NOTE: 'translations' endpoint forces English output
     with open(audio_path, "rb") as audio_file:
         transcript = openai_client.audio.translations.create(
             model="whisper-1", file=audio_file, response_format="verbose_json"
@@ -220,48 +171,44 @@ def generate_subtitles_english(audio_path):
         full_text += text + " "
     return srt_content, full_text
 
-def apply_final_polish_v6(input_path, srt_path, font_path, output_path, blur_watermarks=True, is_vertical=True):
-    logging.info(f"✨ Applying Final Polish (V6: Branding + Subs)...")
+def apply_final_polish_v6(input_path, srt_path, font_path, output_path, channel_name, blur_watermarks=True, is_vertical=True):
+    logging.info(f"✨ Applying Final Polish (Branding: {channel_name})...")
     
     # 1. Prepare Paths
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-    # Get directory for fontsdir
     font_dir = os.path.dirname(font_path).replace("\\", "/").replace(":", "\\:")
     safe_font_path = font_path.replace("\\", "/").replace(":", "\\:")
     
-    # --- CHANNEL BRANDING SETTINGS ---
-    channel_name = "@ViralShorts" # <--- YOUR CHANNEL NAME HERE
-    
-    # --- SUBTITLE STYLE SETTINGS ---
-    # FontName=Arial (Matches file)
-    # FontSize=70 (Readable)
-    # MarginV=180 (Sits ABOVE the channel name at the bottom)
+    # 2. Escape Branding text
+    safe_channel = channel_name.replace(":", "\\:").replace("'", "")
+
+    # 3. Subtitle Style (Lower Position for 7% blur area)
+    # MarginV=80 puts it right above the very bottom
+    # FontSize=65 is standard large for 1080p
     if is_vertical:
-        style = "FontName=Arial,Alignment=2,MarginV=180,FontSize=70,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
-        # Channel Name Settings
-        brand_size = 40
-        brand_y = "h-th-40" # 40px from bottom
+        style = "FontName=Arial,Alignment=2,MarginV=80,FontSize=65,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
+        brand_size = 35
+        brand_y = "h-th-15" # 15px from the absolute bottom
     else:
-        style = "FontName=Arial,Alignment=2,MarginV=60,FontSize=40,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
-        brand_size = 24
-        brand_y = "h-th-20"
+        style = "FontName=Arial,Alignment=2,MarginV=40,FontSize=40,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+        brand_size = 20
+        brand_y = "h-th-10"
 
     cmd = ["ffmpeg", "-y", "-i", input_path]
     filter_chain = []
     last_label = "0:v"
 
-    # 2. Blur Watermarks (Bottom 15% to cover original UI)
+    # 4. Blur Watermarks (Only 7% at bottom as requested)
     if blur_watermarks and is_vertical:
-        filter_chain.append(f"[{last_label}]crop=iw:ih*0.15:0:ih*0.85,boxblur=luma_radius=20[bot_blur]")
+        filter_chain.append(f"[{last_label}]crop=iw:ih*0.07:0:ih*0.93,boxblur=luma_radius=20[bot_blur]")
         filter_chain.append(f"[{last_label}][bot_blur]overlay=0:H-h[v_blurred]")
         last_label = "v_blurred"
 
-    # 3. Add Channel Name (Static Drawtext at Bottom)
-    # This renders FIRST so it is "under" the subtitles if they overlap
-    filter_chain.append(f"[{last_label}]drawtext=fontfile='{safe_font_path}':text='{channel_name}':fontcolor=white:fontsize={brand_size}:x=(w-text_w)/2:y={brand_y}:shadowcolor=black:shadowx=2:shadowy=2[v_branded]")
+    # 5. Add Branding Layer (Channel Name)
+    filter_chain.append(f"[{last_label}]drawtext=fontfile='{safe_font_path}':text='{safe_channel}':fontcolor=white@0.8:fontsize={brand_size}:x=(w-text_w)/2:y={brand_y}:shadowcolor=black:shadowx=1:shadowy=1[v_branded]")
     last_label = "v_branded"
 
-    # 4. Burn Subtitles (WITH FONTSDIR)
+    # 6. Burn Subtitles
     if os.path.exists(srt_path):
         filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{style}'[v_final]")
         last_label = "v_final"
@@ -279,44 +226,16 @@ def generate_packaging_v4(transcript_text, duration, output_format="9:16"):
     logging.info("📦 Generating V4.0 Packaging...")
     is_short = (output_format == "9:16")
     video_type_str = "reel" if is_short else "youtube"
-
     try:
-        formatted_prompt = Template(SEO_METADATA_PROMPT).safe_substitute(
-            video_type=video_type_str,
-            transcript=transcript_text[:2500]
-        )
-        res = openai_client.chat.completions.create(
-            model="gpt-4o", 
-            messages=[{"role":"user", "content": formatted_prompt}], 
-            response_format={"type": "json_object"}
-        )
+        formatted_prompt = Template(SEO_METADATA_PROMPT).safe_substitute(video_type=video_type_str, transcript=transcript_text[:2000])
+        res = openai_client.chat.completions.create(model="gpt-4o", messages=[{"role":"user", "content": formatted_prompt}], response_format={"type": "json_object"})
         meta = json.loads(res.choices[0].message.content)
-    except Exception as e:
-        logging.error(f"Metadata Gen Failed: {e}")
-        meta = {"title": "Viral Video", "description": "", "tags": []}
-
-    try:
         context_data = meta.get('description', transcript_text[:500])
         thumb_gen_prompt = Template(THUMBNAIL_ARTIST_PROMPT).safe_substitute(context=context_data)
-        
-        res_thumb = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role":"user", "content": thumb_gen_prompt}]
-        )
-        flux_prompt = res_thumb.choices[0].message.content.strip()
-        
-        flux_aspect = "9:16" if is_short else "16:9"
-        output = replicate.run(
-            "black-forest-labs/flux-schnell",
-            input={"prompt": flux_prompt + ", photorealistic, 8k", "aspect_ratio": flux_aspect}
-        )
-        thumb_url = str(output[0])
-    except Exception as e:
-        logging.error(f"Thumbnail Gen Failed: {e}")
-        thumb_url = None
-
-    meta['thumbnail_prompt'] = flux_prompt if 'flux_prompt' in locals() else "N/A"
-    return meta, thumb_url
+        output = replicate.run("black-forest-labs/flux-schnell", input={"prompt": thumb_gen_prompt + ", photorealistic, 8k", "aspect_ratio": "9:16" if is_short else "16:9"})
+        return meta, str(output[0])
+    except Exception:
+        return {"title": "Viral Edit #Shorts", "description": "", "tags": []}, None
 
 # -------------------------------------------------------------------------
 # 🏭 MAIN TASK
@@ -327,7 +246,6 @@ def process_video_upload(self, form_data: dict):
     temp_dir = f"/tmp/edit_{task_id}"
     os.makedirs(temp_dir, exist_ok=True)
     
-    # Paths
     raw_path = os.path.join(temp_dir, "raw.mp4")
     cropped_path = os.path.join(temp_dir, "cropped.mp4")
     processed_path = os.path.join(temp_dir, "processed.mp4")
@@ -338,10 +256,8 @@ def process_video_upload(self, form_data: dict):
     try:
         def update(msg): self.update_state(state="PROGRESS", meta={"message": msg})
         
-        # 1. SETUP: Download Font
         font_path = ensure_font(temp_dir)
-        
-        update("Downloading Video...")
+        update("Downloading Media...")
         download_file(form_data['video_url'], raw_path)
         dur, w, h = get_video_info(raw_path)
         
@@ -349,52 +265,45 @@ def process_video_upload(self, form_data: dict):
         is_landscape = w > h
         is_vertical_output = (target_format == '9:16')
         
+        # CAPTURE DYNAMIC CHANNEL NAME FROM FORM
+        user_channel = form_data.get('channel_name', '@ViralShorts')
+        
         current_video = raw_path
 
-        # 2. FORCE CROP
+        # FORCE CROP
         if target_format == '9:16' and is_landscape:
-            update("Cropping to Vertical...")
+            update("Formatting to Vertical...")
             crop_to_vertical_force(raw_path, cropped_path)
             current_video = cropped_path
             is_landscape = False 
-        elif target_format == '9:16' and not is_landscape:
-            pass
 
-        # 3. Silence Removal
-        if form_data.get('remove_silence') == 'true':
-            update("Removing Silence...")
-            remove_silence_optimized(current_video, processed_path)
-            current_video = processed_path
+        remove_silence_optimized(current_video, processed_path)
+        current_video = processed_path
         
-        # 4. Transcription
         transcript_text = "Video Content"
         srt_exists = False
         if form_data.get('add_subtitles') == 'true':
-            update("Transcribing...")
+            update("AI Captioning...")
             subprocess.run(["ffmpeg", "-y", "-i", current_video, "-q:a", "0", "-map", "a", audio_path], check=True)
             srt_content, transcript_text = generate_subtitles_english(audio_path)
-            
             if len(srt_content) > 10:
                 with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
                 srt_exists = True
             
-        # 5. Final Polish (V6 Mode)
+        # APPLY POLISH (V6)
         update("Applying Polish...")
         apply_final_polish_v6(
             current_video, 
             srt_path if srt_exists else None,
             font_path,
             final_path,
+            channel_name=user_channel,
             blur_watermarks=(form_data.get('blur_watermarks') == 'true'),
             is_vertical=is_vertical_output
         )
         
-        # 6. Packaging
-        update("Generating Assets...")
         meta, thumb_url = generate_packaging_v4(transcript_text, dur, target_format)
-        
-        # 7. Upload
-        update("Uploading...")
+        update("Finalizing...")
         cloud_res = cloudinary.uploader.upload(final_path, folder="viral_edits", resource_type="video")
         
         return {
