@@ -25,10 +25,10 @@ def get_media_duration(file_path: str) -> float:
         logging.error(f"Error getting duration for {file_path}: {e}")
         return 0.0
 
-
 def process_and_stitch_scenes(scene_pairs: List[Tuple[str, str]], temp_visual_path: str) -> bool:
     """
-    Stitches pre-generated video clips (from HeyGen) and their dialogue audio into a single base video.
+    Stitches pre-generated video clips.
+    CRITICAL FIX: Forces Audio to Stereo (2 Channels) @ 44.1kHz to prevent silence.
     """
     request_id = str(uuid.uuid4())
     temp_dir = os.path.join("/tmp", f"stitch_request_{request_id}")
@@ -40,21 +40,37 @@ def process_and_stitch_scenes(scene_pairs: List[Tuple[str, str]], temp_visual_pa
         logging.info(f"Processing {len(scene_pairs)} pairs for Stitching.")
 
         for i, (video, audio) in enumerate(scene_pairs):
-            if not os.path.exists(video) or not os.path.exists(audio): continue
+            if not os.path.exists(video): continue
 
             chunk_name = os.path.join(temp_dir, f"chunk_{i}.mp4")
-            audio_dur = get_media_duration(audio)
-            if audio_dur == 0: continue
+            
+            # Determine duration
+            audio_dur = get_media_duration(audio) if audio and os.path.exists(audio) else 0.0
+            video_dur = get_media_duration(video)
+            # Use audio duration if valid, otherwise video duration
+            final_dur = audio_dur if audio_dur > 0.5 else video_dur
+            if final_dur <= 0: final_dur = 5.0 # Fallback
 
             cmd = [
-                "ffmpeg", "-y", "-stream_loop", "-1", "-i", video, "-i", audio,
-                "-t", str(audio_dur),
-                "-map", "0:v", "-map", "1:a",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast",
-                "-crf", "23",
-                "-c:a", "aac", "-shortest",
-                chunk_name
+                "ffmpeg", "-y", "-stream_loop", "-1", "-i", video
             ]
+            
+            # Add Audio Input
+            if audio and os.path.exists(audio):
+                cmd.extend(["-i", audio, "-map", "0:v", "-map", "1:a"])
+            else:
+                # Generate Silent Audio (Stereo/44.1kHz)
+                cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-map", "0:v", "-map", "1:a"])
+
+            cmd.extend([
+                "-t", str(final_dur),
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "23",
+                # CRITICAL AUDIO FIX: Force AAC Stereo 44.1kHz
+                "-c:a", "aac", "-ac", "2", "-ar", "44100",
+                "-shortest",
+                chunk_name
+            ])
+            
             subprocess.run(cmd, check=True, capture_output=True)
             chunk_paths.append(chunk_name)
 
@@ -65,7 +81,7 @@ def process_and_stitch_scenes(scene_pairs: List[Tuple[str, str]], temp_visual_pa
                 abs_path = os.path.abspath(chunk).replace("'", "'\\''")
                 f.write(f"file '{abs_path}'\n")
 
-        logging.info("Concatenating chunks into visual base file...")
+        logging.info("Concatenating chunks...")
         subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", input_list_path, "-c", "copy", temp_visual_path
@@ -73,17 +89,12 @@ def process_and_stitch_scenes(scene_pairs: List[Tuple[str, str]], temp_visual_pa
 
         return True
 
-    except subprocess.CalledProcessError as e:
-        logging.error(f"FFmpeg scene stitching failed: {e.stderr.decode()}")
-        return False
     except Exception as e:
-        logging.error(f"General stitching error: {e}")
+        logging.error(f"Stitching failed: {e}")
         return False
     finally:
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
-            logging.info(f"Cleaned up temp dir: {temp_dir}")
-
 
 def composite_green_screen_scene(
     background_image_path: str,
@@ -91,8 +102,8 @@ def composite_green_screen_scene(
     output_path: str
 ) -> bool:
     """
-    Composites a Green Screen video (HeyGen) over a Static Background.
-    UPDATED: Scales avatar to 400px and moves to Bottom-Left.
+    Composites a Green Screen video over a Background.
+    FIX: Uses 'aac' audio codec instead of 'copy' to ensure compatibility.
     """
     try:
         if not os.path.exists(background_image_path) or not os.path.exists(green_screen_video_path):
@@ -102,66 +113,52 @@ def composite_green_screen_scene(
         duration = get_media_duration(green_screen_video_path)
         if duration <= 0: duration = 5.0
 
-        # --- POSITIONING & SCALING FIX ---
-        # 1. Scale background to 1080x1920 (Target Resolution) with ZoomPan
-        # 2. Scale Actor to 400 pixels wide (maintain aspect ratio) -> [scaled_actor]
-        # 3. Remove Green -> [actor_trans]
-        # 4. Overlay at x=30 (Left padding), y=H-h-30 (Bottom padding)
-        
+        # Scale Logic: Fits the 'Talking Photo' or 'Avatar' nicely
         cmd = [
             "ffmpeg", "-y",
             "-loop", "1", "-i", background_image_path,  # Input 0: BG
             "-i", green_screen_video_path,             # Input 1: Actor
             "-filter_complex",
-            # Background Zoom Effect
+            # Background: Slight zoom effect for 'Cinema' feel
             f"[0:v]scale=8000:-1,zoompan=z='min(zoom+0.0015,1.5)':d={int(duration*25)+100}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920[bg];"
-            # Actor Scale & Keying
-            "[1:v]scale=400:-1[scaled_actor];"
-            "[scaled_actor]colorkey=0x00FF00:0.1:0.1[actor_trans];"
-            # Final Overlay (Bottom Left)
-            "[bg][actor_trans]overlay=30:H-h-30:shortest=1",
+            # Actor: Scale to width 1080 (full width fit) or 400 (corner) depending on preference.
+            # Current setting: 1080 width (Full presence) for Cinematic feel
+            "[1:v]scale=1080:-1[actor];"
+            "[bg][actor]overlay=(W-w)/2:H-h:shortest=1",
             "-t", str(duration),
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast",
-            "-c:a", "copy",
+            "-c:a", "aac", # Re-encode audio to safe format
             output_path
         ]
         
         subprocess.run(cmd, check=True, capture_output=True)
         return os.path.exists(output_path)
 
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Composite failed: {e.stderr.decode() if e.stderr else e}")
-        return False
     except Exception as e:
-        logging.error(f"General composite error: {e}")
+        logging.error(f"Composite failed: {e}")
         return False
-
 
 def mix_music_and_finalize(temp_visual_path: str, music_path: str, final_output_path: str) -> bool:
     """
-    Applies Loudness Normalization and mixes the dialogue track with the background music track.
+    Mixes dialogue and background music.
+    CRITICAL FIX: Replaced 'loudnorm' with simple Volume filter to prevent silence on short clips.
     """
     if not os.path.exists(music_path):
         shutil.move(temp_visual_path, final_output_path)
-        logging.warning("Music mix skipped. Copied base video only.")
         return True
 
-    logging.info("Applying Loudness Normalization and mixing audio...")
+    logging.info("Mixing background music...")
 
     try:
         cmd = [
-            "ffmpeg", "-y", 
-            "-i", temp_visual_path, 
-            "-stream_loop", "-1", "-i", music_path, 
-            "-filter_complex", 
-            "[0:a]loudnorm=I=-14:LRA=7:tp=-2,volume=0.9[dia];" 
-            "[1:a]loudnorm=I=-22:LRA=7:tp=-2[bg];" 
-            "[dia][bg]amix=inputs=2:duration=first:weights=1 1[outa]", 
+            "ffmpeg", "-y",
+            "-i", temp_visual_path,
+            "-stream_loop", "-1", "-i", music_path,
+            "-filter_complex",
+            # FIX: Simple volume mix. Voice=1.0 (100%), Music=0.15 (15%)
+            "[0:a]volume=1.0[v];[1:a]volume=0.15[m];[v][m]amix=inputs=2:duration=first[outa]",
             "-map", "0:v", "-map", "[outa]",
-            "-c:v", "libx264", 
-            "-vf", "scale='min(720,iw)':-2", 
-            "-preset", "fast",
-            "-crf", "23",
+            "-c:v", "copy", # Copy video stream (fast)
             "-c:a", "aac", "-b:a", "192k",
             "-shortest", final_output_path
         ]
@@ -169,6 +166,7 @@ def mix_music_and_finalize(temp_visual_path: str, music_path: str, final_output_
         return True
 
     except Exception as e:
-        logging.error(f"General mix error: {e}")
+        logging.error(f"Music mix failed: {e}")
+        # Fallback: Return video without music if mixing crashes
         shutil.move(temp_visual_path, final_output_path)
         return False
