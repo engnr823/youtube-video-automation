@@ -1,4 +1,3 @@
-# file: celery_worker.py
 import os
 import sys
 import logging
@@ -97,7 +96,7 @@ def ensure_font(temp_dir):
     return font_path
 
 # -------------------------------------------------------------------------
-# ✂️ VIDEO PROCESSING
+# ✂️ VIDEO PROCESSING FUNCTIONS
 # -------------------------------------------------------------------------
 
 def crop_to_vertical_force(input_path, output_path):
@@ -117,21 +116,19 @@ def generate_subtitles_english(audio_path):
             model="whisper-1", file=audio_file, response_format="verbose_json"
         )
     srt_content = ""
-    full_text = ""
     for i, segment in enumerate(transcript.segments):
         start = format_timestamp(segment.start)
         end = format_timestamp(segment.end)
         text = segment.text.strip()
         srt_content += f"{i+1}\n{start} --> {end}\n{text}\n\n"
-        full_text += text + " "
-    return srt_content, full_text
+    return srt_content
 
 def apply_final_polish_v7(input_path, srt_path, font_path, output_path, channel_name, blur_watermarks=True, is_vertical=True):
     """
     V7 GOLDEN FIX:
-    - Subtitles exactly above branding.
-    - Subtitle Size: 20px (Requested).
-    - Branding: Dynamic user input.
+    - Blur area: Bottom 7%
+    - Subtitles: 20px size, placed EXACTLY above channel name.
+    - Channel Name: Dynamic branding from user input.
     """
     logging.info(f"✨ Rendering V7 (Branding: {channel_name})...")
     
@@ -139,18 +136,18 @@ def apply_final_polish_v7(input_path, srt_path, font_path, output_path, channel_
     font_dir = os.path.dirname(font_path).replace("\\", "/").replace(":", "\\:")
     safe_font_path = font_path.replace("\\", "/").replace(":", "\\:")
     
-    # 1. Channel Branding Positioning
+    # Escape Branding text for FFmpeg
     safe_brand = channel_name.replace(":", "\\:").replace("'", "")
 
-    # 2. Subtitle Style Logic
-    # MarginV=50 puts text in the bottom blur area.
-    # FontSize=20 as requested.
+    # Subtitle Style Logic
+    # MarginV=70 (Moved up slightly from bottom to sit above channel name)
+    # FontSize=20 (As requested)
     if is_vertical:
-        sub_style = "FontName=Arial,Alignment=2,MarginV=50,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+        sub_style = f"FontName=Arial,Alignment=2,MarginV=70,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
         brand_size = 24
-        brand_y = "h-th-15" # 15px from very bottom
+        brand_y = "h-th-20" # 20px from very bottom
     else:
-        sub_style = "FontName=Arial,Alignment=2,MarginV=30,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Bold=1"
+        sub_style = f"FontName=Arial,Alignment=2,MarginV=40,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Bold=1"
         brand_size = 18
         brand_y = "h-th-10"
 
@@ -158,21 +155,23 @@ def apply_final_polish_v7(input_path, srt_path, font_path, output_path, channel_
     filter_chain = []
     last_label = "0:v"
 
-    # 3. Blur (7% at bottom)
+    # 1. BLUR LOGIC (Strict 7% at bottom)
     if blur_watermarks and is_vertical:
+        # crop bottom 7% -> Blur -> Overlay back
         filter_chain.append(f"[{last_label}]crop=iw:ih*0.07:0:ih*0.93,boxblur=luma_radius=20[bot_blur]")
         filter_chain.append(f"[{last_label}][bot_blur]overlay=0:H-h[v_blurred]")
         last_label = "v_blurred"
 
-    # 4. Burn Branding Layer
+    # 2. BRANDING LAYER (Channel Name)
     filter_chain.append(f"[{last_label}]drawtext=fontfile='{safe_font_path}':text='{safe_brand}':fontcolor=white:fontsize={brand_size}:x=(w-text_w)/2:y={brand_y}:shadowcolor=black:shadowx=1:shadowy=1[v_branded]")
     last_label = "v_branded"
 
-    # 5. Burn Subtitles Layer (Using fontsdir to ensure Arial loads)
+    # 3. SUBTITLE LAYER (Burning SRT into video)
     if os.path.exists(srt_path):
         filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{sub_style}'[v_final]")
         last_label = "v_final"
 
+    # 4. EXECUTION
     if filter_chain:
         full_filter = ";".join(filter_chain)
         cmd.extend(["-filter_complex", full_filter, "-map", f"[{last_label}]", "-map", "0:a?", "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-c:a", "copy"])
@@ -191,6 +190,7 @@ def process_video_upload(self, form_data: dict):
     temp_dir = f"/tmp/edit_{task_id}"
     os.makedirs(temp_dir, exist_ok=True)
     
+    # All Paths Defined
     raw_path = os.path.join(temp_dir, "raw.mp4")
     processed_path = os.path.join(temp_dir, "processed.mp4")
     final_path = os.path.join(temp_dir, "final.mp4")
@@ -200,39 +200,39 @@ def process_video_upload(self, form_data: dict):
     try:
         def update(msg): self.update_state(state="PROGRESS", meta={"message": msg})
         
+        # Start Pipeline
         font_path = ensure_font(temp_dir)
         update("Downloading video...")
         download_file(form_data['video_url'], raw_path)
-        dur, w, h = get_video_info(raw_path)
         
+        dur, w, h = get_video_info(raw_path)
         target_format = form_data.get('output_format', '9:16')
         is_landscape = w > h
         is_vertical_output = (target_format == '9:16')
         
-        # Capture the BRANDING name from the form
+        # Capture User Branding
         user_brand = form_data.get('channel_name', '@ViralShorts')
         
         current_video = raw_path
 
-        # FORCE CROP if needed
+        # 1. Format Check (Force 9:16)
         if target_format == '9:16' and is_landscape:
-            update("Formatting Vertical...")
+            update("Formatting to Vertical...")
             crop_to_vertical_force(raw_path, processed_path)
             current_video = processed_path
-            is_landscape = False 
         
-        # Transcription
+        # 2. Transcription Logic
         srt_exists = False
         if form_data.get('add_subtitles') == 'true':
             update("Generating Captions...")
             subprocess.run(["ffmpeg", "-y", "-i", current_video, "-q:a", "0", "-map", "a", audio_path], check=True)
-            srt_content, _ = generate_subtitles_english(audio_path)
+            srt_content = generate_subtitles_english(audio_path)
             if len(srt_content) > 10:
                 with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
                 srt_exists = True
             
-        # Final Render Pass (V7)
-        update("Final Rendering...")
+        # 3. Final Polish Pass
+        update("Applying Visuals & Branding...")
         apply_final_polish_v7(
             current_video, 
             srt_path if srt_exists else None,
@@ -243,13 +243,14 @@ def process_video_upload(self, form_data: dict):
             is_vertical=is_vertical_output
         )
         
+        # 4. Upload to Cloudinary
         update("Uploading...")
         cloud_res = cloudinary.uploader.upload(final_path, folder="viral_edits", resource_type="video")
         
         return {
             "status": "success",
             "video_url": cloud_res.get("secure_url"),
-            "metadata": {"title": "Edited Video #Shorts"},
+            "metadata": {"title": "Viral Reel Produced"},
             "transcript_srt": srt_content if srt_exists else None
         }
 
@@ -257,4 +258,5 @@ def process_video_upload(self, form_data: dict):
         logging.error(f"Task Failed: {traceback.format_exc()}")
         return {"status": "error", "message": str(e)}
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
