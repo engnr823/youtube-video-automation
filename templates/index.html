@@ -89,14 +89,23 @@
         <h1>AI Viral Video Editor</h1>
         <p class="subtitle">Repurpose • Edit • Caption • Polish</p>
 
-        <form id="editorForm">
+        <form id="editorForm" enctype="multipart/form-data">
             <fieldset>
                 <legend><i class="bi bi-cloud-upload"></i> Source Material</legend>
+                
                 <div class="mb-3">
-                    <label class="form-label">Raw Video Link</label>
+                    <label class="form-label">Upload Video File (Best)</label>
+                    <input type="file" class="form-control" name="video_file" accept="video/mp4,video/mov,video/webm">
+                    <div class="form-text text-muted">Upload raw file directly (Max 100MB recommended).</div>
+                </div>
+
+                <div class="text-center text-muted fw-bold my-3">- OR -</div>
+
+                <div class="mb-3">
+                    <label class="form-label">Paste Video Link</label>
                     <input type="url" class="form-control" name="video_url" 
-                           placeholder="https://files.drive.google.com/..." required>
-                    <div class="form-text text-muted">Direct link to mp4 (Google Drive, Dropbox, etc.)</div>
+                           placeholder="https://drive.google.com/...">
+                    <div class="form-text text-muted">Public Link (Google Drive, Dropbox, Cloudinary).</div>
                 </div>
             </fieldset>
 
@@ -216,26 +225,35 @@
         const resultArea = document.getElementById("resultArea");
         const btn = document.getElementById("submitBtn");
 
-        // Use the same endpoint logic as before, just mapped to new UI
         form.onsubmit = async (e) => {
             e.preventDefault();
+            
+            // Basic validation
+            const fileInput = form.querySelector('input[name="video_file"]');
+            const urlInput = form.querySelector('input[name="video_url"]');
+            
+            if (!fileInput.files.length && !urlInput.value.trim()) {
+                alert("Please upload a file OR provide a link.");
+                return;
+            }
+
             btn.disabled = true;
-            btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Processing...';
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Uploading...';
             
             resultArea.style.display = "none";
             statusArea.style.display = "block";
+            statusTitle.innerText = "Uploading Media...";
+            statusText.innerText = "Please wait while we send your video to the cloud.";
             
             const formData = new FormData(form);
 
             try {
-                // IMPORTANT: Ensure your backend route is '/process_video' or similar, 
-                // OR update the celery_worker to handle this 'task_type' if using a single route.
-                // For this example, we assume the backend maps POST /generate to the new worker logic.
                 const res = await fetch("/generate", { method: "POST", body: formData });
                 const data = await res.json();
                 
                 if (data.status === "error") throw new Error(data.message);
                 
+                statusTitle.innerText = "AI Editor Running...";
                 pollTask(data.task_id);
 
             } catch (err) {
@@ -249,20 +267,20 @@
                     const res = await fetch(`/check_result/${taskId}`);
                     const data = await res.json();
 
-                    if (data.status === "ready" || data.status === "success") {
+                    if (data.status === "success" || data.status === "ready") {
                         clearInterval(interval);
                         displaySuccess(data);
                     } else if (data.status === "error" || data.status === "failed") {
                         clearInterval(interval);
                         showError(data.message);
                     } else {
-                        // Update loading text based on worker logs (if available)
-                        statusTitle.innerText = " AI Editor at Work";
-                        statusText.innerText = data.message || "Processing video frames...";
+                        // Update status text
+                        statusTitle.innerText = "Processing...";
+                        statusText.innerText = data.message || "Applying AI magic...";
                     }
                 } catch (e) {
                     clearInterval(interval);
-                    showError("Lost connection to server.");
+                    showError("Connection lost. Please refresh.");
                 }
             }, 3000);
         }
@@ -295,7 +313,7 @@
                 tags.forEach(t => {
                     const s = document.createElement("span");
                     s.className = "tag";
-                    s.innerText = "#" + t.replace(/#/g, '');
+                    s.innerText = t.startsWith('#') ? t : "#" + t;
                     tagsDiv.appendChild(s);
                 });
             }
@@ -310,7 +328,7 @@
             statusArea.style.background = "#fee2e2";
             statusArea.style.color = "#991b1b";
             statusArea.style.border = "1px solid #fecaca";
-            statusTitle.innerText = "Production Failed";
+            statusTitle.innerText = "Error Occurred";
             statusText.innerHTML = msg;
             btn.disabled = false;
             btn.innerHTML = '<i class="bi bi-lightning-charge-fill"></i> Try Again';
