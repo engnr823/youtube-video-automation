@@ -36,61 +36,38 @@ if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.
     )
 
 # ===================================================================
-# --- 🧠 SYSTEM PROMPTS V4.0 (INTEGRATED)
+# --- 🧠 SYSTEM PROMPTS V4.0
 # ===================================================================
 
 SEO_METADATA_PROMPT = """
 # --- SYSTEM PROMPT V4.0 — SENIOR YOUTUBE SEO STRATEGIST
-You are a Senior YouTube Growth Strategist and SEO Algorithm Expert.
-Your goal is to engineer metadata that maximizes Click-Through Rate (CTR) and Search Ranking (SEO) by leveraging semantic keywords and psychological hooks.
+You are a Senior YouTube Growth Strategist.
+Goal: Maximize CTR and SEO.
 
 # --- INPUT CONTEXT
 VIDEO TYPE: ${video_type}
 SCRIPT CONTEXT: ${transcript}
 
-# --- OPTIMIZATION RULES (STRICT SEO)
-1. TITLE ENGINEERING (Max 60 chars):
-   - STRUCTURE: [Primary Keyword] + [Power Word/Emotional Hook].
-   - STRATEGY: Create a "Curiosity Gap". Don't reveal the ending.
-   - FORMAT: If VIDEO TYPE is "reel", strictly append "#Shorts".
-   - LANGUAGE: English (Optimized for Global Reach).
+# --- OPTIMIZATION RULES
+1. TITLE: [Primary Keyword] + [Power Word]. If "reel", add #Shorts. Max 60 chars.
+2. DESCRIPTION: Hook (2 sentences) + Deep Dive (100 words) + Tags.
+3. TAGS: Broad + Exact + Long-Tail.
 
-2. DESCRIPTION "SEO SANDWICH" STRUCTURE:
-   - SECTION 1 (The Hook): 2 sentences. First sentence MUST include the Primary Keyword verbatim.
-   - SECTION 2 (The Deep Dive): A detailed 100-word summary of value. Use "LSI Keywords".
-   - SECTION 3 (Key Takeaways): A bulleted list of 3-4 things the viewer will learn.
-   - SECTION 4 (Call to Action): "Subscribe for more."
-
-3. TAGS & KEYWORDS:
-   - Mix of Broad, Exact Match, and Long-Tail tags.
-
-# --- OUTPUT SCHEMA (STRICT JSON)
-Return ONLY a valid JSON object:
+# --- OUTPUT SCHEMA (JSON)
 {
-  "title": "Optimized Clickable Title #Shorts",
-  "description": "Full SEO-rich description...",
-  "tags": ["tag1", "tag2", "tag3"],
-  "primary_keyword": "extracted_keyword"
+  "title": "Optimized Title #Shorts",
+  "description": "Full description...",
+  "tags": ["tag1", "tag2"],
+  "primary_keyword": "keyword"
 }
 """
 
 THUMBNAIL_ARTIST_PROMPT = """
 # --- SYSTEM PROMPT V4.0 — THUMBNAIL ARTIST
-You are an expert YouTube Thumbnail Artist.
-Your job is to write ONE detailed text-to-image prompt for the Flux AI generator based on this video context: ${context}
-
-# --- OUTPUT REQUIREMENTS
-Write a single, highly detailed image prompt. Focus on:
-1. The most emotional/dramatic moment.
-2. High Emotion in facial expressions (Fear, Joy, Shock).
-3. Cinematic Lighting: "Rembrandt lighting", "Volumetric fog", or "Rim light".
-4. Texture Quality: "Raw photo", "f/1.8 aperture", "4k", "detailed skin texture".
-5. Composition: "Rule of thirds", "Depth of field".
-
-STRICT NEGATIVE CONSTRAINTS:
---no text, words, logos, ui, cartoon, anime, plastic, 3d render, doll, low resolution, blurry
-
-Output ONLY the raw prompt text.
+Write ONE detailed text-to-image prompt for Flux AI based on: ${context}
+Focus on: High Emotion (Fear/Joy), Cinematic Lighting (Rembrandt), 8k texture.
+Negative: No text, no blurry, no cartoon.
+Output ONLY the prompt text.
 """
 
 # -------------------------------------------------------------------------
@@ -120,7 +97,7 @@ def download_file(url, dest_path):
         headers = {'User-Agent': 'Mozilla/5.0'}
         with requests.get(download_url, stream=True, timeout=300, headers=headers) as r:
             if r.status_code in [401, 403]:
-                raise RuntimeError("⛔ Access Denied. Make sure link is Public.")
+                raise RuntimeError("⛔ Access Denied. Public links only.")
             r.raise_for_status()
             with open(dest_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
@@ -147,12 +124,40 @@ def format_timestamp(seconds):
     millis = int(td.microseconds / 1000)
     return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
+def ensure_font(temp_dir):
+    """Downloads a font to ensure Subtitles work on Railway."""
+    font_path = os.path.join(temp_dir, "Roboto-Bold.ttf")
+    if not os.path.exists(font_path):
+        logging.info("📥 Downloading Font for Subtitles...")
+        # Using a reliable CDN for Roboto Bold
+        url = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
+        try:
+            r = requests.get(url, timeout=10)
+            with open(font_path, 'wb') as f:
+                f.write(r.content)
+        except:
+            logging.warning("Font download failed. Subtitles might fail.")
+    return font_path
+
 # -------------------------------------------------------------------------
-# ✂️ VIDEO PROCESSING (OPTIMIZED ENGINE)
+# ✂️ VIDEO PROCESSING
 # -------------------------------------------------------------------------
 
+def crop_to_vertical_force(input_path, output_path):
+    """Forces video to 9:16 (Vertical) separately to guarantee aspect ratio."""
+    logging.info("📐 Force Cropping to Vertical (9:16)...")
+    # scale height to 1920, keep aspect, then crop center 1080
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf", "scale=-1:1920,crop=1080:1920:((iw-1080)/2):0,setsar=1",
+        "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+        "-c:a", "copy",
+        output_path
+    ]
+    subprocess.run(cmd, check=True)
+
 def remove_silence_optimized(input_path, output_path, db_threshold=-30, min_silence_duration=0.6):
-    logging.info("✂️ Processing Jump Cuts (High Quality)...")
+    logging.info("✂️ Processing Jump Cuts...")
     try:
         cmd = ["ffmpeg", "-i", input_path, "-af", f"silencedetect=noise={db_threshold}dB:d={min_silence_duration}", "-f", "null", "-"]
         result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
@@ -191,10 +196,9 @@ def remove_silence_optimized(input_path, output_path, db_threshold=-30, min_sile
         filter_complex += "".join([f"[v{i}][a{i}]" for i in range(concat_idx)])
         filter_complex += f"concat=n={concat_idx}:v=1:a=1[outv][outa]"
 
-        # OPTIMIZATION: Use -crf 18 to PRESERVE QUALITY in this intermediate step
         subprocess.run([
             "ffmpeg", "-y", "-i", input_path, "-filter_complex", filter_complex,
-            "-map", "[outv]", "-map", "[outa]", "-c:v", "libx264", "-crf", "18", "-preset", "fast", output_path
+            "-map", "[outv]", "-map", "[outa]", "-c:v", "libx264", "-crf", "23", "-preset", "fast", output_path
         ], check=True)
     except Exception:
         logging.warning("Silence removal failed, using original.")
@@ -202,7 +206,6 @@ def remove_silence_optimized(input_path, output_path, db_threshold=-30, min_sile
 
 def generate_subtitles_english(audio_path):
     logging.info("🎙️ Transcribing & Translating to English...")
-    # Forces English translation for all input languages
     with open(audio_path, "rb") as audio_file:
         transcript = openai_client.audio.translations.create(
             model="whisper-1", file=audio_file, response_format="verbose_json"
@@ -217,45 +220,42 @@ def generate_subtitles_english(audio_path):
         full_text += text + " "
     return srt_content, full_text
 
-def apply_final_polish_optimized(input_path, srt_path, output_path, blur_watermarks=True, is_vertical=True, do_crop=False):
+def apply_polish_with_font(input_path, srt_path, font_path, output_path, blur_watermarks=True, is_vertical=True):
     """
-    COMBINED PASS: Crop + Blur + Subtitles.
-    Uses 'MarginV=550' (The 'First Code' Position) for safety.
+    Applies Blur + Subtitles using a SPECIFIC FONT FILE to fix missing system fonts.
     """
-    logging.info(f"✨ Applying Combined Polish (Crop: {do_crop}, Vertical: {is_vertical})...")
+    logging.info(f"✨ Applying Polish (Blur + Subs)... Font: {font_path}")
     
-    # --- STYLE (Safe Zone) ---
-    if is_vertical:
-        # MarginV=550 = Upper-Lower-Middle. Safe from TikTok/Reels UI.
-        style = "Alignment=2,MarginV=550,FontSize=26,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
-    else:
-        style = "Alignment=2,MarginV=80,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
-
+    # 
+    
+    # 1. Escape Paths for FFmpeg (CRITICAL)
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
+    safe_font = font_path.replace("\\", "/").replace(":", "\\:")
+    
+    # 2. Define Style with FontFile
+    # We use MarginV=550 for vertical to keep it in the "Safe Zone" (Upper Lower Third)
+    if is_vertical:
+        style = f"Fontname=Roboto,FontFile='{safe_font}',Alignment=2,MarginV=550,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
+    else:
+        style = f"Fontname=Roboto,FontFile='{safe_font}',Alignment=2,MarginV=80,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+
     cmd = ["ffmpeg", "-y", "-i", input_path]
     filter_chain = []
     last_label = "0:v"
 
-    # 1. CROP
-    if do_crop:
-        filter_chain.append(f"[{last_label}]scale=-1:1920,crop=1080:1920:((iw-1080)/2):0,setsar=1[v_cropped]")
-        last_label = "v_cropped"
-
-    # 2. BLUR WATERMARKS
+    # 3. Blur Watermarks (Bottom 10%)
     if blur_watermarks and is_vertical:
         filter_chain.append(f"[{last_label}]crop=iw:ih*0.10:0:ih*0.90,boxblur=luma_radius=20[bot_blur]")
         filter_chain.append(f"[{last_label}][bot_blur]overlay=0:H-h[v_blurred]")
         last_label = "v_blurred"
 
-    # 3. SUBTITLES
+    # 4. Burn Subtitles
     if os.path.exists(srt_path):
         filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':force_style='{style}'[v_final]")
         last_label = "v_final"
 
-    # EXECUTE
     if filter_chain:
         full_filter = ";".join(filter_chain)
-        # Use CRF 23 for final output
         cmd.extend(["-filter_complex", full_filter, "-map", f"[{last_label}]", "-map", "0:a?", "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-c:a", "copy"])
     else:
         cmd.extend(["-c", "copy"])
@@ -268,7 +268,6 @@ def generate_packaging_v4(transcript_text, duration, output_format="9:16"):
     is_short = (output_format == "9:16")
     video_type_str = "reel" if is_short else "youtube"
 
-    # 1. METADATA (using V4 prompt)
     try:
         formatted_prompt = Template(SEO_METADATA_PROMPT).safe_substitute(
             video_type=video_type_str,
@@ -284,9 +283,7 @@ def generate_packaging_v4(transcript_text, duration, output_format="9:16"):
         logging.error(f"Metadata Gen Failed: {e}")
         meta = {"title": "Viral Video", "description": "", "tags": []}
 
-    # 2. THUMBNAIL (using V4 prompt logic)
     try:
-        # Pass the generated description to the Artist Prompt
         context_data = meta.get('description', transcript_text[:500])
         thumb_gen_prompt = Template(THUMBNAIL_ARTIST_PROMPT).safe_substitute(context=context_data)
         
@@ -295,24 +292,19 @@ def generate_packaging_v4(transcript_text, duration, output_format="9:16"):
             messages=[{"role":"user", "content": thumb_gen_prompt}]
         )
         flux_prompt = res_thumb.choices[0].message.content.strip()
-        
         logging.info(f"🎨 Flux Prompt: {flux_prompt[:50]}...")
         
         flux_aspect = "9:16" if is_short else "16:9"
         output = replicate.run(
             "black-forest-labs/flux-schnell",
-            input={
-                "prompt": flux_prompt + ", photorealistic, 8k, highly detailed", 
-                "aspect_ratio": flux_aspect
-            }
+            input={"prompt": flux_prompt + ", photorealistic, 8k", "aspect_ratio": flux_aspect}
         )
         thumb_url = str(output[0])
     except Exception as e:
         logging.error(f"Thumbnail Gen Failed: {e}")
         thumb_url = None
-        flux_prompt = "Error"
 
-    meta['thumbnail_prompt'] = flux_prompt
+    meta['thumbnail_prompt'] = flux_prompt if 'flux_prompt' in locals() else "N/A"
     return meta, thumb_url
 
 # -------------------------------------------------------------------------
@@ -324,7 +316,9 @@ def process_video_upload(self, form_data: dict):
     temp_dir = f"/tmp/edit_{task_id}"
     os.makedirs(temp_dir, exist_ok=True)
     
+    # Paths
     raw_path = os.path.join(temp_dir, "raw.mp4")
+    cropped_path = os.path.join(temp_dir, "cropped.mp4") # New Intermediate
     processed_path = os.path.join(temp_dir, "processed.mp4")
     final_path = os.path.join(temp_dir, "final.mp4")
     audio_path = os.path.join(temp_dir, "audio.mp3")
@@ -333,50 +327,62 @@ def process_video_upload(self, form_data: dict):
     try:
         def update(msg): self.update_state(state="PROGRESS", meta={"message": msg})
         
-        # 1. Ingest
+        # 1. SETUP: Download Font & Video
+        font_path = ensure_font(temp_dir) # <--- CRITICAL FIX 1
         update("Downloading Video...")
         download_file(form_data['video_url'], raw_path)
         dur, w, h = get_video_info(raw_path)
         
         target_format = form_data.get('output_format', '9:16')
         is_landscape = w > h
-        need_crop = (target_format == '9:16' and is_landscape)
         is_vertical_output = (target_format == '9:16')
         
         current_video = raw_path
 
-        # 2. Silence Removal (Pass 1 - High Quality)
+        # 2. FORCE CROP (Guarantees 9:16 Output) <--- CRITICAL FIX 2
+        if target_format == '9:16' and is_landscape:
+            update("Cropping to Vertical...")
+            crop_to_vertical_force(raw_path, cropped_path)
+            current_video = cropped_path
+            # Update info since dimensions changed
+            _, w, h = get_video_info(current_video)
+            is_landscape = False 
+        elif target_format == '9:16' and not is_landscape:
+            # Already vertical, keep using raw
+            pass
+
+        # 3. Silence Removal
         if form_data.get('remove_silence') == 'true':
             update("Removing Silence...")
             remove_silence_optimized(current_video, processed_path)
             current_video = processed_path
         
-        # 3. Transcription (Force English)
+        # 4. Transcription (English)
         transcript_text = "Video Content"
         srt_exists = False
         if form_data.get('add_subtitles') == 'true':
-            update("Transcribing to English...")
+            update("Transcribing...")
             subprocess.run(["ffmpeg", "-y", "-i", current_video, "-q:a", "0", "-map", "a", audio_path], check=True)
             srt_content, transcript_text = generate_subtitles_english(audio_path)
             with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
             srt_exists = True
             
-        # 4. Final Polish (Pass 2 - Crop + Blur + Subs)
+        # 5. Final Polish (Blur + Subs with Explicit Font)
         update("Applying Polish...")
-        apply_final_polish_optimized(
+        apply_polish_with_font(
             current_video, 
             srt_path if srt_exists else None,
+            font_path, # Passing font file
             final_path,
             blur_watermarks=(form_data.get('blur_watermarks') == 'true'),
-            is_vertical=is_vertical_output,
-            do_crop=need_crop
+            is_vertical=is_vertical_output
         )
         
-        # 5. Packaging (V4.0 SEO)
+        # 6. Packaging
         update("Generating Assets...")
         meta, thumb_url = generate_packaging_v4(transcript_text, dur, target_format)
         
-        # 6. Upload
+        # 7. Upload
         update("Uploading...")
         cloud_res = cloudinary.uploader.upload(final_path, folder="viral_edits", resource_type="video")
         
