@@ -189,6 +189,7 @@ def remove_silence_optimized(input_path, output_path, db_threshold=-30, min_sile
 
 def generate_subtitles_english(audio_path):
     logging.info("🎙️ Transcribing & Translating to English...")
+    # NOTE: 'translations' endpoint forces English output
     with open(audio_path, "rb") as audio_file:
         transcript = openai_client.audio.translations.create(
             model="whisper-1", file=audio_file, response_format="verbose_json"
@@ -203,24 +204,24 @@ def generate_subtitles_english(audio_path):
         full_text += text + " "
     return srt_content, full_text
 
-def apply_final_polish_simple(input_path, srt_path, output_path, blur_watermarks=True, is_vertical=True):
+def apply_final_polish_moviepy(input_path, srt_path, output_path, blur_watermarks=True, is_vertical=True):
     """
-    Applies Polish using NO FONT CONFIG (The 'Old Code' Method).
+    Applies Subtitles via FFmpeg with NO FONT DEPENDENCIES.
+    Uses 'force_style' with only basic parameters to let FFmpeg decide the default font.
     """
-    logging.info(f"✨ Applying Final Polish (Simple Mode)...")
+    logging.info(f"✨ Applying Final Polish (Minimal Style)...")
     
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     
-    # --- STYLE SETTINGS (NO FONT NAME) ---
-    # We REMOVE 'FontName=...' entirely.
-    # We keep the SIZE and BOX settings for visibility.
+    # --- MINIMAL STYLE (NO FONT NAME) ---
+    # We remove FontName completely. FFmpeg will use its internal bitmap font if vector fonts fail.
+    # We remove 'Outline' and 'Shadow' to reduce complexity.
+    # We keep 'FontSize' relative to video height (24 is small, but safe).
+    # We keep 'MarginV' to place it safely.
     if is_vertical:
-        # FontSize=80 (Big)
-        # BorderStyle=3 (Box)
-        # BackColour (Black Background)
-        style = "Alignment=2,MarginV=280,FontSize=80,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,BackColour=&H80000000,Outline=0,Shadow=0,Bold=1"
+        style = "Alignment=2,MarginV=250,FontSize=28,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2"
     else:
-        style = "Alignment=2,MarginV=60,FontSize=45,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,BackColour=&H80000000,Outline=0,Shadow=0,Bold=1"
+        style = "Alignment=2,MarginV=50,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2"
 
     cmd = ["ffmpeg", "-y", "-i", input_path]
     filter_chain = []
@@ -347,9 +348,9 @@ def process_video_upload(self, form_data: dict):
                 with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
                 srt_exists = True
             
-        # 5. Final Polish (Using Simple Mode - No Font Config)
+        # 5. Final Polish (Minimal Style)
         update("Applying Polish...")
-        apply_final_polish_simple(
+        apply_final_polish_moviepy(
             current_video, 
             srt_path if srt_exists else None,
             final_path,
