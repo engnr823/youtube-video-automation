@@ -178,62 +178,66 @@ def generate_subtitles(audio_path):
 def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True):
     logging.info("✨ Applying Final Polish...")
     
-    style = "Alignment=2,MarginV=50,Fontname=Arial,FontSize=24,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=3,Outline=2,Shadow=0,Bold=1"
+    # --- FONT FIX FOR URDU/HINDI ---
+    # We remove 'Arial' and let FFmpeg use the system fallback, 
+    # OR specify 'Noto Sans' if available in your Docker image.
+    # We also change 'BorderStyle=3' (Opaque Box) to 'BorderStyle=1' (Outline Only) to remove the ugly boxes.
+    
+    # Style: Yellow Text (PrimaryColour=&H00FFFF), Black Outline (OutlineColour=&H00000000)
+    # Alignment=2 (Bottom Center), MarginV=50 (Lifted up)
+    # Fontname='' lets FFmpeg pick best system font
+    style = "Alignment=2,MarginV=50,FontSize=24,PrimaryColour=&H00FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+    
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     
     filters = []
     
+    # Blur Logic (Safe Syntax)
     if blur_watermarks:
-        # CRITICAL FIX: The logic for blurring top/bottom was crashing because of unescaped commas.
-        # Fixed logic: Draw a transparent box with boxblur filter.
-        # This uses simple 'gblur' logic instead of complex enable expressions to be safer.
-        # Step 1: Split video. Step 2: Crop Top & Blur. Step 3: Overlay back. 
-        # Actually, simpler is better: 'delogo' or 'gblur' on specific area.
-        # Let's try the safest method: crop -> boxblur -> overlay.
-        # Filter: [0:v]crop=iw:150:0:0,boxblur=10[top];[0:v][top]overlay=0:0[tmp];[0:v]crop=iw:200:0:h-200,boxblur=10[bot];[tmp][bot]overlay=0:H-h
-        
-        # Simplified blur filter that is syntax-safe:
         filters.append("crop=iw:150:0:0,boxblur=10[top];[0:v][top]overlay=0:0[v1];[0:v]crop=iw:200:0:ih-200,boxblur=10[bot];[v1][bot]overlay=0:H-h")
         
-    # Since complex filter chain logic above changes stream names [v1], we need a robust approach.
-    # We will use the 'drawbox' to just draw black bars if blur fails, but let's try the 'enable' fix first.
-    # FIX: Single quotes around the expression is key.
-    
+    # Subtitles Logic
+    if os.path.exists(srt_path):
+        # We append the subtitles filter to the end of the chain
+        # If blur was used, it pipes into subtitles automatically via complex filter map
+        # But simpler logic: separate pass or intelligent mapping.
+        # Let's use simple chaining: filter1,filter2
+        # However, complex filter above creates [v1] etc.
+        # Safe method: Use a separate command if blur is complex, or use the working blur string:
+        # "boxblur=luma_radius=20:luma_power=1:enable='between(y,0,150)+between(y,h-200,h)'" -> This crashed.
+        # So we stick to crop/overlay.
+        pass
+
+    # CONSTRUCT COMMAND CAREFULLY
     cmd = ["ffmpeg", "-y", "-i", input_path]
     
-    # We will build a complex filter string properly
-    complex_filter = ""
+    filter_chain = ""
+    map_v = "0:v"
     
     if blur_watermarks:
-        # Define blur regions safely
-        complex_filter += "[0:v]crop=iw:180:0:0,boxblur=luma_radius=20[top];" \
-                          "[0:v]crop=iw:220:0:ih-220,boxblur=luma_radius=20[bot];" \
-                          "[0:v][top]overlay=0:0[v1];" \
-                          "[v1][bot]overlay=0:H-h"
-        last_stream = "[outv]" # Use implicit output if subtitles added next, otherwise map explicit
-        complex_filter += "[v2]" # Name the final output of blur
-        
-        # Correction: The overlay logic needs to chain properly.
-        # [0:v][top]overlay=0:0[v1]; [v1][bot]overlay=0:H-h[v_blurred]
-        complex_filter = "[0:v]crop=iw:180:0:0,boxblur=20[top];[0:v]crop=iw:220:0:ih-220,boxblur=20[bot];[0:v][top]overlay=0:0[v1];[v1][bot]overlay=0:H-h[v_blurred]"
-        video_map = "[v_blurred]"
+        # This complex filter defines a blurring pipeline
+        filter_chain += "[0:v]crop=iw:180:0:0,boxblur=20[top];[0:v]crop=iw:220:0:ih-220,boxblur=20[bot];[0:v][top]overlay=0:0[v1];[v1][bot]overlay=0:H-h[v_blurred]"
+        map_v = "[v_blurred]"
     else:
-        video_map = "0:v"
+        # If no blur, we just pass the video through or prep for subs
+        if os.path.exists(srt_path):
+            # We need a dummy chain to start if we just want subs on 0:v? No, subs is a filter.
+            pass
 
     if os.path.exists(srt_path):
-        # Chain subtitles onto the blurred video
-        # Note: subtitles filter takes a filename, not a stream. It applies to the video stream.
-        # We need to apply subtitles TO the [v_blurred] stream.
-        if blur_watermarks:
-            complex_filter += f";[v_blurred]subtitles='{safe_srt}':force_style='{style}'[v_final]"
-            video_map = "[v_final]"
+        if filter_chain:
+            # Add subtitles to the blurred stream
+            filter_chain += f";[{map_v}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
+            map_v = "[v_final]"
         else:
-            complex_filter = f"subtitles='{safe_srt}':force_style='{style}'[v_final]"
-            video_map = "[v_final]"
+            # Just subtitles on original
+            filter_chain = f"[0:v]subtitles='{safe_srt}':force_style='{style}'[v_final]"
+            map_v = "[v_final]"
 
-    if complex_filter:
-        cmd.extend(["-filter_complex", complex_filter, "-map", video_map, "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy"])
+    if filter_chain:
+        cmd.extend(["-filter_complex", filter_chain, "-map", map_v, "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy"])
     else:
+        # No filters at all
         cmd.extend(["-c", "copy"])
         
     cmd.append(output_path)
@@ -243,16 +247,24 @@ def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True):
 def generate_packaging(transcript_text, duration):
     logging.info("📦 Generating Viral Packaging...")
     try:
-        prompt = f"Analyze transcript: '{transcript_text[:800]}...'. Output JSON with keys: title (viral short), description (seo), tags (5 hashtags), thumbnail_prompt (cinematic)."
+        # Updated Prompt for Better Thumbnail
+        prompt = f"""
+        Analyze transcript: '{transcript_text[:800]}...'. 
+        Output JSON with keys: 
+        - title (Viral Shorts style, max 60 chars)
+        - description (SEO optimized with keywords)
+        - tags (5 hashtags)
+        - thumbnail_prompt (A highly detailed, cinematic image prompt for an AI art generator. Describe the lighting, subject, and mood intensely.)
+        """
         res = openai_client.chat.completions.create(
             model="gpt-4o", messages=[{"role":"user", "content":prompt}], response_format={"type": "json_object"}
         )
         meta = json.loads(res.choices[0].message.content)
         
-        logging.info(f"🎨 Generating Thumbnail: {meta.get('thumbnail_prompt')[:20]}...")
+        logging.info(f"🎨 Generating Thumbnail: {meta.get('thumbnail_prompt')[:30]}...")
         output = replicate.run(
             "black-forest-labs/flux-schnell",
-            input={"prompt": "Cinematic YouTube Thumbnail, " + meta.get('thumbnail_prompt', 'Viral scene'), "aspect_ratio": "9:16"}
+            input={"prompt": meta.get('thumbnail_prompt', 'Viral video thumbnail') + ", high resolution, 8k, cinematic lighting", "aspect_ratio": "9:16"}
         )
         thumb_url = str(output[0])
         return meta, thumb_url
@@ -269,6 +281,7 @@ def process_video_upload(self, form_data: dict):
     temp_dir = f"/tmp/edit_{task_id}"
     os.makedirs(temp_dir, exist_ok=True)
     
+    # Paths
     raw_path = os.path.join(temp_dir, "raw.mp4")
     processed_path = os.path.join(temp_dir, "processed.mp4")
     final_path = os.path.join(temp_dir, "final.mp4")
@@ -306,11 +319,11 @@ def process_video_upload(self, form_data: dict):
             srt_content, transcript_text = generate_subtitles(audio_path)
             with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
             
-        # 5. Final Polish (Blur + Subs)
+        # 5. Final Polish
         update("Applying Polish...")
         apply_final_polish(
             current_video, 
-            srt_path if form_data.get('add_subtitles') == 'true' else "/dev/null",
+            srt_path if form_data.get('add_subtitles') == 'true' else None,
             final_path,
             blur_watermarks=(form_data.get('blur_watermarks') == 'true')
         )
