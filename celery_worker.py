@@ -178,66 +178,38 @@ def generate_subtitles(audio_path):
 def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True):
     logging.info("✨ Applying Final Polish...")
     
-    # --- FONT FIX FOR URDU/HINDI ---
-    # We remove 'Arial' and let FFmpeg use the system fallback, 
-    # OR specify 'Noto Sans' if available in your Docker image.
-    # We also change 'BorderStyle=3' (Opaque Box) to 'BorderStyle=1' (Outline Only) to remove the ugly boxes.
-    
-    # Style: Yellow Text (PrimaryColour=&H00FFFF), Black Outline (OutlineColour=&H00000000)
-    # Alignment=2 (Bottom Center), MarginV=50 (Lifted up)
-    # Fontname='' lets FFmpeg pick best system font
+    # Updated Style: No opaque box (BorderStyle=1), Yellow Text.
     style = "Alignment=2,MarginV=50,FontSize=24,PrimaryColour=&H00FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
-    
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     
-    filters = []
-    
-    # Blur Logic (Safe Syntax)
-    if blur_watermarks:
-        filters.append("crop=iw:150:0:0,boxblur=10[top];[0:v][top]overlay=0:0[v1];[0:v]crop=iw:200:0:ih-200,boxblur=10[bot];[v1][bot]overlay=0:H-h")
-        
-    # Subtitles Logic
-    if os.path.exists(srt_path):
-        # We append the subtitles filter to the end of the chain
-        # If blur was used, it pipes into subtitles automatically via complex filter map
-        # But simpler logic: separate pass or intelligent mapping.
-        # Let's use simple chaining: filter1,filter2
-        # However, complex filter above creates [v1] etc.
-        # Safe method: Use a separate command if blur is complex, or use the working blur string:
-        # "boxblur=luma_radius=20:luma_power=1:enable='between(y,0,150)+between(y,h-200,h)'" -> This crashed.
-        # So we stick to crop/overlay.
-        pass
-
-    # CONSTRUCT COMMAND CAREFULLY
     cmd = ["ffmpeg", "-y", "-i", input_path]
-    
     filter_chain = ""
-    map_v = "0:v"
+    
+    # Track the current video stream name. Starts as '0:v'.
+    current_stream = "0:v"
     
     if blur_watermarks:
-        # This complex filter defines a blurring pipeline
-        filter_chain += "[0:v]crop=iw:180:0:0,boxblur=20[top];[0:v]crop=iw:220:0:ih-220,boxblur=20[bot];[0:v][top]overlay=0:0[v1];[v1][bot]overlay=0:H-h[v_blurred]"
-        map_v = "[v_blurred]"
-    else:
-        # If no blur, we just pass the video through or prep for subs
-        if os.path.exists(srt_path):
-            # We need a dummy chain to start if we just want subs on 0:v? No, subs is a filter.
-            pass
+        # Blur Top & Bottom
+        filter_chain += f"[{current_stream}]crop=iw:180:0:0,boxblur=20[top];" \
+                        f"[{current_stream}]crop=iw:220:0:ih-220,boxblur=20[bot];" \
+                        f"[{current_stream}][top]overlay=0:0[v1];" \
+                        f"[v1][bot]overlay=0:H-h[v_blurred]"
+        current_stream = "v_blurred" # Update pointer (no brackets here for logic)
 
     if os.path.exists(srt_path):
         if filter_chain:
-            # Add subtitles to the blurred stream
-            filter_chain += f";[{map_v}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
-            map_v = "[v_final]"
+            # Chain it: Add separator and use the LAST stream created
+            filter_chain += f";[{current_stream}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
         else:
-            # Just subtitles on original
-            filter_chain = f"[0:v]subtitles='{safe_srt}':force_style='{style}'[v_final]"
-            map_v = "[v_final]"
+            # Start chain if empty
+            filter_chain += f"[{current_stream}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
+        
+        current_stream = "v_final"
 
     if filter_chain:
-        cmd.extend(["-filter_complex", filter_chain, "-map", map_v, "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy"])
+        # Map the final stream pointer (add brackets now for mapping)
+        cmd.extend(["-filter_complex", filter_chain, "-map", f"[{current_stream}]", "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy"])
     else:
-        # No filters at all
         cmd.extend(["-c", "copy"])
         
     cmd.append(output_path)
@@ -247,7 +219,6 @@ def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True):
 def generate_packaging(transcript_text, duration):
     logging.info("📦 Generating Viral Packaging...")
     try:
-        # Updated Prompt for Better Thumbnail
         prompt = f"""
         Analyze transcript: '{transcript_text[:800]}...'. 
         Output JSON with keys: 
