@@ -1,229 +1,136 @@
 # file: video_clients/heygen_client.py
 import os
-import time
 import requests
+import time
 import logging
-from typing import Optional, Dict, Any, List
-import random
+import json
 
-# -------------------------------------------------
-# CONFIG
-# -------------------------------------------------
+# Configure logging
+logger = logging.getLogger(__name__)
 
 HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
-HEYGEN_BASE_URL = "https://api.heygen.com"
-
-# --- CRITICAL FIX: UPDATED BACKUP AVATAR LIST ---
-# If your account has no avatars, we rotate through these public stock IDs.
-BACKUP_STOCK_AVATARS = [
-    "daf0aeb75914449980d4407b1e427d14", # Pierce (Generic Male)
-    "0f82e18b45614ee28864700057e494a8", # Wayne (Generic Male)
-    "a83859550e6347149a4253109a933de3"  # Fin (Generic Male)
-]
-# Fallback if list fails
-SAFE_AVATAR_ID = "daf0aeb75914449980d4407b1e427d14" 
-
-# Standard Green Screen color for potential chroma keying
-GREEN_SCREEN_COLOR = "#00B140"
-
-POLL_INTERVAL = 10       
-MAX_WAIT_TIME = 600      
-
-logging.basicConfig(level=logging.INFO)
-logging.info("*** NEW HEYGEN CLIENT CODE LOADED (v8-ROBUST-STOCK) ***")
 
 class HeyGenError(Exception):
+    """Custom exception for HeyGen API errors."""
     pass
 
-# -------------------------------------------------
-# LOW LEVEL REQUEST HANDLER
-# -------------------------------------------------
-
-def _request(method: str, endpoint: str, payload: Optional[Dict] = None, timeout: int = 120) -> Dict[str, Any]:
+def _request(method, endpoint, json_data=None, timeout=60):
+    """Helper to make HTTP requests to HeyGen."""
     if not HEYGEN_API_KEY:
-        raise HeyGenError("HEYGEN_API_KEY is missing")
+        raise HeyGenError("HEYGEN_API_KEY not found in environment variables.")
 
+    url = f"https://api.heygen.com{endpoint}"
     headers = {
         "X-Api-Key": HEYGEN_API_KEY,
         "Content-Type": "application/json"
     }
 
     try:
-        response = requests.request(
-            method=method,
-            url=f"{HEYGEN_BASE_URL}{endpoint}",
-            headers=headers,
-            json=payload,
-            timeout=timeout
-        )
-        
-        # Swallow 404s during polling (job initializing)
-        if response.status_code == 404 and "status" in endpoint:
-            logging.warning(f"Status 404 for {endpoint}. Retrying...")
-            return None
-
-        if response.status_code >= 400:
-            try:
-                err_data = response.json()
-                msg = err_data.get("error", {}).get("message") or err_data.get("message")
-                
-                if "not found" in str(msg).lower():
-                    raise HeyGenError(f"AVATAR_NOT_FOUND: {msg}")
-                
-                logging.error(f"HeyGen API Error: {msg}")
-            except Exception as e:
-                if isinstance(e, HeyGenError): raise e
-                logging.error(f"HeyGen Raw Error: {response.text}")
-        
+        response = requests.request(method, url, headers=headers, json=json_data, timeout=timeout)
         response.raise_for_status()
         return response.json()
-
-    except HeyGenError:
-        raise
+    except requests.exceptions.HTTPError as e:
+        error_msg = f"HeyGen API Error: {e.response.text}"
+        if response.status_code == 400 or response.status_code == 404:
+             # Identify Avatar Not Found specifically
+             if "avatar_id" in response.text or "not found" in response.text:
+                 raise HeyGenError(f"AVATAR_NOT_FOUND: {response.text}")
+        raise HeyGenError(error_msg)
     except Exception as e:
-        if "404" in str(e) and "status" in endpoint:
-            return None
-        raise HeyGenError(f"HeyGen Error: {str(e)}")
+        raise HeyGenError(str(e))
 
-# -------------------------------------------------
-# AVATAR MANAGEMENT
-# -------------------------------------------------
+def get_all_avatars():
+    """Fetches list of available avatars."""
+    try:
+        data = _request("GET", "/v2/avatars")
+        return data.get("data", {}).get("avatars", [])
+    except Exception as e:
+        logger.error(f"Failed to fetch avatars: {e}")
+        return []
 
-def get_all_avatars() -> List[Dict]:
+def check_video_status(video_id):
+    """Checks status of video generation."""
+    data = _request("GET", f"/v1/video_status.get?video_id={video_id}")
+    return data.get("data", {})
+
+def generate_heygen_video(avatar_id, audio_url, aspect_ratio="16:9", background_image_url=None, use_green_screen=False):
     """
-    Fetches available avatars. If empty, returns generic STOCK avatars
-    so the pipeline doesn't crash.
+    Generates a video. 
+    SMART LOGIC: Detects if ID is a 'Talking Photo' (UUID) or 'Avatar' (String).
     """
-    retries = 2
-    for attempt in range(retries + 1):
-        try:
-            logging.info(f"Fetching avatars (Attempt {attempt+1})...")
-            data = _request("GET", "/v2/avatars", timeout=120)
-            if data:
-                avatars = data.get("data", {}).get("avatars", [])
-                
-                # --- CRITICAL FIX: Handle Empty Account ---
-                if not avatars:
-                    logging.warning("⚠️ No Personal Avatars found! Injecting Stock Backups.")
-                    return [
-                        {"avatar_id": pid, "name": f"Stock_Backup_{i}"} 
-                        for i, pid in enumerate(BACKUP_STOCK_AVATARS)
-                    ]
-                
-                logging.info(f"✅ Found {len(avatars)} avatars.")
-                return avatars
-        except Exception as e:
-            logging.warning(f"Avatar fetch failed: {e}")
-            time.sleep(2)
-            
-    # Final safety net
-    return [{"avatar_id": SAFE_AVATAR_ID, "name": "System_Fallback"}]
-
-def get_safe_fallback_id():
-    return SAFE_AVATAR_ID
-
-# -------------------------------------------------
-# JOB POLLING
-# -------------------------------------------------
-
-def _wait_for_job(video_id: str) -> str:
-    logging.info(f"HeyGen Polling for Video ID: {video_id}")
-    time.sleep(15) 
-    start = time.time()
+    logger.info(f"Submitting Job: Avatar={avatar_id}")
     
-    while time.time() - start < MAX_WAIT_TIME:
-        data = _request("GET", f"/v1/video_status.get?video_id={video_id}")
-        
-        if data is None:
-            time.sleep(POLL_INTERVAL)
-            continue
+    # --- SMART DETECTION LOGIC ---
+    # 3D Avatars usually have underscores (e.g., 'josh_lite3_20230714')
+    # Talking Photos are usually UUIDs (e.g., '4343bfb447bf4028a48b598ae297f5dc')
+    is_talking_photo = False
+    if len(avatar_id) == 32 and "_" not in avatar_id:
+        is_talking_photo = True
+        logger.info(f"💡 Detected UUID format. Switching to TALKING PHOTO mode for {avatar_id}")
 
-        inner = data.get("data", {})
-        status = inner.get("status")
-        
-        if status == "completed":
-            url = inner.get("video_url")
-            if url: return url
-        
-        if status == "failed":
-            raise HeyGenError(f"Job failed: {inner.get('error')}")
+    # Prepare Aspect Ratio / Dimension
+    # Talking Photos often require specific dimensions, but we'll try to map ratio
+    dimension = {"width": 1080, "height": 1920} if aspect_ratio == "9:16" else {"width": 1920, "height": 1080}
 
-        time.sleep(POLL_INTERVAL)
-
-    raise HeyGenError("Timeout waiting for video")
-
-# -------------------------------------------------
-# MAIN GENERATION FUNCTION
-# -------------------------------------------------
-
-def generate_heygen_video(
-    avatar_id: str,
-    audio_url: str,
-    aspect_ratio: str = "9:16",
-    background_image_url: str = None,
-    background_color: str = "#000000",
-    use_green_screen: bool = False  # <--- NEW PARAMETER
-) -> str:
-    
-    if aspect_ratio == "9:16":
-        dimension = {"width": 1080, "height": 1920}
-    else:
-        dimension = {"width": 1280, "height": 720}
-
-    # --- LOGIC CHANGE FOR GREEN SCREEN ---
-    if use_green_screen:
-        # Use a bright green for easy chroma keying
-        background = {"type": "color", "value": "#00FF00"}
-    elif background_image_url:
-        background = {"type": "image", "url": background_image_url}
-    else:
-        background = {"type": "color", "value": background_color}
-
-    # Standardize Payload
+    # Payload Construction
     payload = {
-        "video_inputs": [{
-            "character": {
-                "type": "avatar",
-                "avatar_id": avatar_id,
-                "avatar_style": "normal"
-            },
-            "voice": {
-                "type": "audio",
-                "audio_url": audio_url
-            },
-            "background": background
-        }],
+        "video_inputs": [
+            {
+                "character": {
+                    "type": "avatar" if not is_talking_photo else "talking_photo",
+                    "avatar_id": avatar_id if not is_talking_photo else None,
+                    "talking_photo_id": avatar_id if is_talking_photo else None,
+                    "avatar_style": "normal" if not is_talking_photo else None,
+                    "scale": 1.0
+                },
+                "voice": {
+                    "type": "audio",
+                    "audio_url": audio_url
+                },
+                "background": {
+                    "type": "color",
+                    "value": "#00FF00" # Green screen for compositing
+                }
+            }
+        ],
         "dimension": dimension
     }
 
+    # Clean up None values
+    if is_talking_photo:
+        del payload["video_inputs"][0]["character"]["avatar_id"]
+        del payload["video_inputs"][0]["character"]["avatar_style"]
+    else:
+        del payload["video_inputs"][0]["character"]["talking_photo_id"]
+
     try:
-        logging.info(f"Submitting Job: Avatar={avatar_id}")
+        # Submit
         response = _request("POST", "/v2/video/generate", payload)
-    
-    except HeyGenError as e:
-        # --- CRITICAL FIX: ROTATING FALLBACK ---
-        # If the requested avatar is dead, try the backups
-        if "AVATAR_NOT_FOUND" in str(e):
-            logging.warning(f"🚨 Avatar {avatar_id} failed. Trying backup stock avatar...")
+        video_id = response.get("data", {}).get("video_id")
+        
+        if not video_id:
+            raise HeyGenError("No video_id returned")
             
-            # Pick a random backup that isn't the one we just tried
-            backup_id = random.choice(BACKUP_STOCK_AVATARS)
-            payload["video_inputs"][0]["character"]["avatar_id"] = backup_id
+        logger.info(f"HeyGen Job Submitted. Video ID: {video_id}")
+        
+        # Poll
+        for _ in range(60): # Wait up to 5-10 mins (they can be slow)
+            status_data = check_video_status(video_id)
+            status = status_data.get("status")
             
-            try:
-                logging.info(f"♻️ Retrying with Backup: {backup_id}")
-                response = _request("POST", "/v2/video/generate", payload)
-            except Exception as final_e:
-                logging.error("All backups failed.")
-                raise final_e
-        else:
-            raise e
+            if status == "completed":
+                url = status_data.get("video_url")
+                logger.info(f"✅ Video Generated: {url}")
+                return url
+            elif status == "failed":
+                err = status_data.get("error")
+                raise HeyGenError(f"Generation Failed: {err}")
+            
+            logger.info(f"HeyGen Polling for {video_id}: {status}...")
+            time.sleep(10)
+            
+        raise HeyGenError("Timeout waiting for HeyGen")
 
-    video_id = response.get("data", {}).get("video_id")
-    if not video_id:
-        video_id = response.get("video_id") or response.get("job_id")
-
-    if not video_id: 
-        raise HeyGenError("No video_id returned from API")
-
-    return _wait_for_job(video_id)
+    except Exception as e:
+        logger.error(f"HeyGen Error: {e}")
+        return None
