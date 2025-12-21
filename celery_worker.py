@@ -43,21 +43,20 @@ except ImportError:
     logging.warning("⚠️ OpenAI TTS client not found. Fallback will not work.")
 
 # --- CONSTANTS FOR VOICES AND AVATARS ---
-# Internal IDs used for routing logic
+# Internal IDs used for routing logic (Do not change these keys)
 MALE_VOICE_ID = "ErXwobaYiN019PkySvjV" 
 FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
 # --- FIXED CAST LIST (The "Stars" of your SaaS) ---
-# REPLACE THESE IDs WITH VALID AVATAR IDs FROM YOUR HEYGEN ACCOUNT
-# If you don't have a specific Male ID, use the Safe Fallback or a generic public one.
+# UPDATED WITH YOUR SPECIFIC AVATAR IDs
 CAST_LIST = {
-    "MALE_LEAD": "wayne_20240101",        # <--- REPLACE with a specific Male Avatar ID
-    "FEMALE_LEAD": "josh_lite3_20230714", # <--- Using Josh/Lite as safe fallback or Female ID
-    "NARRATOR": "faiza_news_2024"         # <--- REPLACE with Narrator ID
+    "MALE_LEAD": "4343bfb447bf4028a48b598ae297f5dc",    # Your Male Avatar (Kabir)
+    "FEMALE_LEAD": "e0e84faea390465896db75a83be45085", # Public Female Avatar (Sana)
+    "NARRATOR": "4343bfb447bf4028a48b598ae297f5dc"     # Defaulting Narrator to Male Lead
 }
 
-# Fallback if list fails
-SAFE_FALLBACK_AVATAR_ID = "josh_lite3_20230714" 
+# Fallback if logic fails (Updated to your Male ID to ensure it always works)
+SAFE_FALLBACK_AVATAR_ID = "4343bfb447bf4028a48b598ae297f5dc" 
 
 # --- Utility Fix: Define missing ensure_dir function ---
 def ensure_dir(path):
@@ -148,7 +147,7 @@ class SceneSchema(BaseModel):
     action_prompt: str
     audio_narration: Optional[str] = ""
     shot_type: Optional[str] = "medium"
-    is_b_roll: Optional[bool] = False # <--- HYBRID ENGINE: Added field for B-Roll
+    is_b_roll: Optional[bool] = False 
     characters_in_scene: Optional[List[str]] = []
     
 class StoryboardSchema(BaseModel):
