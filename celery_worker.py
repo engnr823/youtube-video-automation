@@ -124,6 +124,22 @@ def format_timestamp(seconds):
     millis = int(td.microseconds / 1000)
     return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
+def ensure_font(temp_dir):
+    """
+    Downloads Arial.ttf.
+    """
+    font_path = os.path.join(temp_dir, "Arial.ttf")
+    if not os.path.exists(font_path):
+        logging.info("📥 Downloading Portable Font (Arial)...")
+        url = "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial.ttf"
+        try:
+            r = requests.get(url, timeout=10)
+            with open(font_path, 'wb') as f:
+                f.write(r.content)
+        except:
+            logging.warning("Font download failed.")
+    return font_path
+
 # -------------------------------------------------------------------------
 # ✂️ VIDEO PROCESSING
 # -------------------------------------------------------------------------
@@ -204,38 +220,50 @@ def generate_subtitles_english(audio_path):
         full_text += text + " "
     return srt_content, full_text
 
-def apply_final_polish_moviepy(input_path, srt_path, output_path, blur_watermarks=True, is_vertical=True):
-    """
-    Applies Subtitles via FFmpeg with NO FONT DEPENDENCIES.
-    Uses 'force_style' with only basic parameters to let FFmpeg decide the default font.
-    """
-    logging.info(f"✨ Applying Final Polish (Minimal Style)...")
+def apply_final_polish_v6(input_path, srt_path, font_path, output_path, blur_watermarks=True, is_vertical=True):
+    logging.info(f"✨ Applying Final Polish (V6: Branding + Subs)...")
     
+    # 1. Prepare Paths
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
+    # Get directory for fontsdir
+    font_dir = os.path.dirname(font_path).replace("\\", "/").replace(":", "\\:")
+    safe_font_path = font_path.replace("\\", "/").replace(":", "\\:")
     
-    # --- MINIMAL STYLE (NO FONT NAME) ---
-    # We remove FontName completely. FFmpeg will use its internal bitmap font if vector fonts fail.
-    # We remove 'Outline' and 'Shadow' to reduce complexity.
-    # We keep 'FontSize' relative to video height (24 is small, but safe).
-    # We keep 'MarginV' to place it safely.
+    # --- CHANNEL BRANDING SETTINGS ---
+    channel_name = "@ViralShorts" # <--- YOUR CHANNEL NAME HERE
+    
+    # --- SUBTITLE STYLE SETTINGS ---
+    # FontName=Arial (Matches file)
+    # FontSize=70 (Readable)
+    # MarginV=180 (Sits ABOVE the channel name at the bottom)
     if is_vertical:
-        style = "Alignment=2,MarginV=250,FontSize=28,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2"
+        style = "FontName=Arial,Alignment=2,MarginV=180,FontSize=70,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
+        # Channel Name Settings
+        brand_size = 40
+        brand_y = "h-th-40" # 40px from bottom
     else:
-        style = "Alignment=2,MarginV=50,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2"
+        style = "FontName=Arial,Alignment=2,MarginV=60,FontSize=40,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+        brand_size = 24
+        brand_y = "h-th-20"
 
     cmd = ["ffmpeg", "-y", "-i", input_path]
     filter_chain = []
     last_label = "0:v"
 
-    # 1. Blur Watermarks
+    # 2. Blur Watermarks (Bottom 15% to cover original UI)
     if blur_watermarks and is_vertical:
-        filter_chain.append(f"[{last_label}]crop=iw:ih*0.10:0:ih*0.90,boxblur=luma_radius=20[bot_blur]")
+        filter_chain.append(f"[{last_label}]crop=iw:ih*0.15:0:ih*0.85,boxblur=luma_radius=20[bot_blur]")
         filter_chain.append(f"[{last_label}][bot_blur]overlay=0:H-h[v_blurred]")
         last_label = "v_blurred"
 
-    # 2. Burn Subtitles (Standard 'subtitles' filter, NO fontsdir)
+    # 3. Add Channel Name (Static Drawtext at Bottom)
+    # This renders FIRST so it is "under" the subtitles if they overlap
+    filter_chain.append(f"[{last_label}]drawtext=fontfile='{safe_font_path}':text='{channel_name}':fontcolor=white:fontsize={brand_size}:x=(w-text_w)/2:y={brand_y}:shadowcolor=black:shadowx=2:shadowy=2[v_branded]")
+    last_label = "v_branded"
+
+    # 4. Burn Subtitles (WITH FONTSDIR)
     if os.path.exists(srt_path):
-        filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':force_style='{style}'[v_final]")
+        filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{style}'[v_final]")
         last_label = "v_final"
 
     if filter_chain:
@@ -310,7 +338,9 @@ def process_video_upload(self, form_data: dict):
     try:
         def update(msg): self.update_state(state="PROGRESS", meta={"message": msg})
         
-        # 1. Ingest
+        # 1. SETUP: Download Font
+        font_path = ensure_font(temp_dir)
+        
         update("Downloading Video...")
         download_file(form_data['video_url'], raw_path)
         dur, w, h = get_video_info(raw_path)
@@ -348,11 +378,12 @@ def process_video_upload(self, form_data: dict):
                 with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
                 srt_exists = True
             
-        # 5. Final Polish (Minimal Style)
+        # 5. Final Polish (V6 Mode)
         update("Applying Polish...")
-        apply_final_polish_moviepy(
+        apply_final_polish_v6(
             current_video, 
             srt_path if srt_exists else None,
+            font_path,
             final_path,
             blur_watermarks=(form_data.get('blur_watermarks') == 'true'),
             is_vertical=is_vertical_output
