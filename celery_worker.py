@@ -126,7 +126,7 @@ def format_timestamp(seconds):
 
 def ensure_font(temp_dir):
     """
-    Downloads Arial.ttf.
+    Downloads Arial.ttf to ensure subtitles work on Railway.
     """
     font_path = os.path.join(temp_dir, "Arial.ttf")
     if not os.path.exists(font_path):
@@ -205,6 +205,7 @@ def remove_silence_optimized(input_path, output_path, db_threshold=-30, min_sile
 
 def generate_subtitles_english(audio_path):
     logging.info("🎙️ Transcribing & Translating to English...")
+    # NOTE: 'translations' endpoint forces English output
     with open(audio_path, "rb") as audio_file:
         transcript = openai_client.audio.translations.create(
             model="whisper-1", file=audio_file, response_format="verbose_json"
@@ -220,21 +221,22 @@ def generate_subtitles_english(audio_path):
     return srt_content, full_text
 
 def apply_final_polish_with_font(input_path, srt_path, font_path, output_path, blur_watermarks=True, is_vertical=True):
-    logging.info(f"✨ Applying Final Polish (BIG Subtitles)...")
+    logging.info(f"✨ Applying Final Polish (NUCLEAR VISIBILITY MODE)...")
     
     # 1. Prepare Paths
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     # Get directory of the font for fontsdir
     font_dir = os.path.dirname(font_path).replace("\\", "/").replace(":", "\\:")
     
-    # 2. Viral Style Settings (UPDATED SIZE)
-    # FontSize=75 (Large and visible on 1080p)
-    # Outline=4 (Thick black border)
-    # MarginV=280 (Lower middle safe zone, not too high, not too low)
+    # 2. NUCLEAR VISIBILITY STYLE SETTINGS
+    # FontSize=85 (Huge)
+    # BorderStyle=3 (Opaque Box behind text - GUARANTEED VISIBILITY)
+    # BackColour=&H80000000 (Black background)
+    # MarginV=350 (Dead Center Lower Third)
     if is_vertical:
-        style = "FontName=Arial,Alignment=2,MarginV=280,FontSize=75,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=4,Shadow=0,Bold=1"
+        style = "FontName=Arial,Alignment=2,MarginV=350,FontSize=85,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,BackColour=&H80000000,Outline=0,Shadow=0,Bold=1"
     else:
-        style = "FontName=Arial,Alignment=2,MarginV=60,FontSize=45,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
+        style = "FontName=Arial,Alignment=2,MarginV=60,FontSize=45,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,BackColour=&H80000000,Outline=0,Shadow=0,Bold=1"
 
     cmd = ["ffmpeg", "-y", "-i", input_path]
     filter_chain = []
@@ -248,6 +250,7 @@ def apply_final_polish_with_font(input_path, srt_path, font_path, output_path, b
 
     # 4. Burn Subtitles (WITH FONTSDIR)
     if os.path.exists(srt_path):
+        # We add 'fontsdir' parameter pointing to our temp folder.
         filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{style}'[v_final]")
         last_label = "v_final"
 
