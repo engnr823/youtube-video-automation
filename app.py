@@ -1,4 +1,3 @@
-# file: main.py
 import os
 import logging
 import cloudinary
@@ -60,22 +59,25 @@ def generate_endpoint():
             return jsonify({"status": "error", "message": "No Video File or URL provided."}), 400
 
         # --- 4. Get Toggles & Options ---
-        # Capture the new Format Selector (9:16 vs 16:9)
         output_format = request.form.get('output_format', '9:16') 
         remove_silence = request.form.get('remove_silence', 'false')
         blur_watermarks = request.form.get('blur_watermarks', 'false')
         add_subtitles = request.form.get('add_subtitles', 'false')
+        
+        # [NEW] Capture Channel Branding
+        channel_name = request.form.get('channel_name', '@ViralShorts')
 
         # --- 5. Prepare Payload for Worker ---
         form_data = {
             "video_url": video_url,
-            "output_format": output_format,  # <--- NEW: Passed to worker
+            "output_format": output_format,
             "remove_silence": remove_silence,
             "blur_watermarks": blur_watermarks,
-            "add_subtitles": add_subtitles
+            "add_subtitles": add_subtitles,
+            "channel_name": channel_name  # <--- Passed to Worker
         }
 
-        logger.info(f"🚀 Dispatching Task for: {video_url} [Format: {output_format}]")
+        logger.info(f"🚀 Dispatching Task for: {video_url} [Branding: {channel_name}]")
 
         # --- 6. Trigger Celery Task ---
         task = process_video_upload.delay(form_data)
