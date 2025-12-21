@@ -59,7 +59,9 @@ def generate_endpoint():
         if not video_url:
             return jsonify({"status": "error", "message": "No Video File or URL provided."}), 400
 
-        # --- 4. Get Toggles ---
+        # --- 4. Get Toggles & Options ---
+        # Capture the new Format Selector (9:16 vs 16:9)
+        output_format = request.form.get('output_format', '9:16') 
         remove_silence = request.form.get('remove_silence', 'false')
         blur_watermarks = request.form.get('blur_watermarks', 'false')
         add_subtitles = request.form.get('add_subtitles', 'false')
@@ -67,12 +69,13 @@ def generate_endpoint():
         # --- 5. Prepare Payload for Worker ---
         form_data = {
             "video_url": video_url,
+            "output_format": output_format,  # <--- NEW: Passed to worker
             "remove_silence": remove_silence,
             "blur_watermarks": blur_watermarks,
             "add_subtitles": add_subtitles
         }
 
-        logger.info(f"🚀 Dispatching Task for: {video_url}")
+        logger.info(f"🚀 Dispatching Task for: {video_url} [Format: {output_format}]")
 
         # --- 6. Trigger Celery Task ---
         task = process_video_upload.delay(form_data)
