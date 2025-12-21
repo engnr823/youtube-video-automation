@@ -76,7 +76,6 @@ def download_file(url, dest_path):
         raise RuntimeError(f"Download failed: {str(e)}")
 
 def get_video_info(file_path):
-    """Returns duration, width, height using FFprobe."""
     try:
         cmd = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -101,7 +100,6 @@ def format_timestamp(seconds):
 # -------------------------------------------------------------------------
 # ✂️ VIDEO PROCESSING FUNCTIONS
 # -------------------------------------------------------------------------
-
 def crop_to_vertical(input_path, output_path):
     logging.info("📐 Auto-Cropping to Vertical (9:16)...")
     cmd = [
@@ -161,9 +159,10 @@ def remove_silence(input_path, output_path, db_threshold=-30, min_silence_durati
         shutil.copy(input_path, output_path)
 
 def generate_subtitles(audio_path):
-    logging.info("🎙️ Transcribing with Whisper...")
+    logging.info("🎙️ Transcribing & Translating to English...")
     with open(audio_path, "rb") as audio_file:
-        transcript = openai_client.audio.transcriptions.create(
+        # UPDATED: Use 'translations' endpoint to force English output regardless of source language
+        transcript = openai_client.audio.translations.create(
             model="whisper-1", file=audio_file, response_format="verbose_json"
         )
     srt_content = ""
@@ -180,52 +179,39 @@ def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True, 
     logging.info(f"✨ Applying Final Polish (Vertical: {is_vertical})...")
     
     # --- STYLE SETTINGS ---
-    # 1. Fontname='Noto Sans': Uses the fonts installed via nixpacks to fix square boxes
-    # 2. BorderStyle=1: Outline mode (removes ugly box)
-    # 3. MarginV: Adjusted based on format (Higher for vertical to sit on blur)
-    
+    # BorderStyle=1 : Outline (Removes ugly box)
+    # PrimaryColour=&H00FFFF : Yellow Text
+    # MarginV=120 : Lifted up to sit comfortably in the bottom 20% area
     if is_vertical:
-        # Bottom Center, Lifted up to sit in the 15% blur zone
-        style = "Alignment=2,MarginV=50,Fontname=Noto Sans,FontSize=24,PrimaryColour=&H00FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+        style = "Alignment=2,MarginV=120,FontSize=20,PrimaryColour=&H00FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
     else:
-        # Smaller font for landscape
-        style = "Alignment=2,MarginV=30,Fontname=Noto Sans,FontSize=16,PrimaryColour=&H00FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Bold=1"
+        style = "Alignment=2,MarginV=50,FontSize=16,PrimaryColour=&H00FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Bold=1"
 
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     cmd = ["ffmpeg", "-y", "-i", input_path]
     
     filter_chain = ""
-    map_v = "0:v"
+    current_stream = "0:v"
     
-    # --- BLUR LOGIC (Bottom 15% Only) ---
-    # Only applies to Vertical Shorts to hide TikTok/Reels UI
+    # --- BLUR LOGIC (Bottom 10% Only) ---
     if blur_watermarks and is_vertical:
-        # Crop bottom 15% -> Blur -> Overlay back at bottom
-        filter_chain += f"[{map_v}]crop=iw:ih*0.15:0:ih*(1-0.15),boxblur=luma_radius=20[bot_blur];" \
-                        f"[{map_v}][bot_blur]overlay=0:H-h[v_blurred]"
-        map_v = "[v_blurred]" # Update pointer to the blurred stream (Use brackets for input reference later)
-        # Note: When used in next step string, we strip brackets if needed, but here let's keep clean variables.
-        # Actually for 'filter_chain' appending, we need to refer to [v_blurred].
-        
-        # Clean variable for next step
-        current_stream_name = "v_blurred"
-    else:
-        current_stream_name = "0:v"
+        # Crop only the bottom 10% (0.10) to hide usernames/logos
+        # y = ih * 0.90 (Starts at 90% height)
+        filter_chain += f"[{current_stream}]crop=iw:ih*0.10:0:ih*0.90,boxblur=luma_radius=20[bot_blur];" \
+                        f"[{current_stream}][bot_blur]overlay=0:H-h[v_blurred]"
+        current_stream = "v_blurred" 
 
     # --- SUBTITLE LOGIC ---
     if os.path.exists(srt_path):
         if filter_chain:
-            # Chain exists, append separator
-            filter_chain += f";[{current_stream_name}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
+            filter_chain += f";[{current_stream}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
         else:
-            # Start new chain
-            filter_chain = f"[{current_stream_name}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
-        
-        current_stream_name = "v_final"
+            filter_chain = f"[{current_stream}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
+        current_stream = "v_final"
 
     # --- EXECUTE ---
     if filter_chain:
-        cmd.extend(["-filter_complex", filter_chain, "-map", f"[{current_stream_name}]", "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy"])
+        cmd.extend(["-filter_complex", filter_chain, "-map", f"[{current_stream}]", "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy"])
     else:
         cmd.extend(["-c", "copy"])
         
@@ -235,13 +221,14 @@ def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True, 
 def generate_packaging(transcript_text, duration):
     logging.info("📦 Generating Viral Packaging...")
     try:
+        # Instructions ask for Mixed Language Metadata for maximum reach
         prompt = f"""
         Analyze transcript: '{transcript_text[:800]}...'. 
         Output JSON with keys: 
-        - title (Viral Shorts style, max 60 chars)
-        - description (SEO optimized with keywords)
-        - tags (5 hashtags)
-        - thumbnail_prompt (A highly detailed, cinematic image prompt for an AI art generator. Describe the lighting, subject, and mood intensely.)
+        - title (Viral Shorts style, Mix of English and Hindi/Urdu keywords, max 60 chars)
+        - description (SEO optimized English description with Urdu tags)
+        - tags (5 hashtags mixed languages)
+        - thumbnail_prompt (A highly detailed, cinematic image prompt for an AI art generator.)
         """
         res = openai_client.chat.completions.create(
             model="gpt-4o", messages=[{"role":"user", "content":prompt}], response_format={"type": "json_object"}
@@ -307,15 +294,15 @@ def process_video_upload(self, form_data: dict):
             remove_silence(current_video, processed_path.replace(".mp4", "_cut.mp4"))
             current_video = processed_path.replace(".mp4", "_cut.mp4")
             
-        # 4. Transcription
+        # 4. Transcription (AUTO-TRANSLATE TO ENGLISH)
         transcript_text = "Video Content"
         if form_data.get('add_subtitles') == 'true':
-            update("Transcribing...")
+            update("Transcribing & Translating...")
             subprocess.run(["ffmpeg", "-y", "-i", current_video, "-q:a", "0", "-map", "a", audio_path], check=True)
             srt_content, transcript_text = generate_subtitles(audio_path)
             with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
             
-        # 5. Final Polish
+        # 5. Final Polish (Blur 10% Bottom, Clean Top)
         update("Applying Polish...")
         apply_final_polish(
             current_video, 
