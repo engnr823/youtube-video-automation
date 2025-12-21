@@ -100,6 +100,7 @@ def format_timestamp(seconds):
 # -------------------------------------------------------------------------
 # ✂️ VIDEO PROCESSING FUNCTIONS
 # -------------------------------------------------------------------------
+
 def crop_to_vertical(input_path, output_path):
     logging.info("📐 Auto-Cropping to Vertical (9:16)...")
     cmd = [
@@ -159,10 +160,12 @@ def remove_silence(input_path, output_path, db_threshold=-30, min_silence_durati
         shutil.copy(input_path, output_path)
 
 def generate_subtitles(audio_path):
-    logging.info("🎙️ Transcribing & Translating to English...")
+    logging.info("🎙️ Transcribing with Whisper (Source Language)...")
+    # Using 'transcriptions' preserves original language (e.g. Urdu/Hindi)
+    # Using 'translations' would force English.
+    # Choose 'transcriptions' for original language accuracy.
     with open(audio_path, "rb") as audio_file:
-        # UPDATED: Use 'translations' endpoint to force English output regardless of source language
-        transcript = openai_client.audio.translations.create(
+        transcript = openai_client.audio.transcriptions.create(
             model="whisper-1", file=audio_file, response_format="verbose_json"
         )
     srt_content = ""
@@ -178,14 +181,17 @@ def generate_subtitles(audio_path):
 def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True, is_vertical=True):
     logging.info(f"✨ Applying Final Polish (Vertical: {is_vertical})...")
     
-    # --- STYLE SETTINGS ---
-    # BorderStyle=1 : Outline (Removes ugly box)
-    # PrimaryColour=&H00FFFF : Yellow Text
-    # MarginV=120 : Lifted up to sit comfortably in the bottom 20% area
+    # --- PRO SUBTITLE STYLE ---
+    # Fontname: Removed (Let fontconfig pick Noto Sans for Urdu/Hindi support)
+    # PrimaryColour=&H00FFFFFF (White Text)
+    # OutlineColour=&H00000000 (Black Outline)
+    # BorderStyle=1 (Outline Only - NO BOX)
+    # MarginV=25 (Very Bottom, sits inside the blur area)
+    
     if is_vertical:
-        style = "Alignment=2,MarginV=120,FontSize=20,PrimaryColour=&H00FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
+        style = "Alignment=2,MarginV=25,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
     else:
-        style = "Alignment=2,MarginV=50,FontSize=16,PrimaryColour=&H00FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Bold=1"
+        style = "Alignment=2,MarginV=25,FontSize=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Bold=1"
 
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     cmd = ["ffmpeg", "-y", "-i", input_path]
@@ -195,8 +201,8 @@ def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True, 
     
     # --- BLUR LOGIC (Bottom 10% Only) ---
     if blur_watermarks and is_vertical:
-        # Crop only the bottom 10% (0.10) to hide usernames/logos
-        # y = ih * 0.90 (Starts at 90% height)
+        # Crop bottom 10% (0.10) -> Blur -> Overlay back
+        # y = ih*0.90 (Starts at 90% down)
         filter_chain += f"[{current_stream}]crop=iw:ih*0.10:0:ih*0.90,boxblur=luma_radius=20[bot_blur];" \
                         f"[{current_stream}][bot_blur]overlay=0:H-h[v_blurred]"
         current_stream = "v_blurred" 
@@ -218,33 +224,62 @@ def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True, 
     cmd.append(output_path)
     subprocess.run(cmd, check=True)
 
-def generate_packaging(transcript_text, duration):
-    logging.info("📦 Generating Viral Packaging...")
+def generate_packaging(transcript_text, duration, output_format="9:16"):
+    logging.info("📦 Generating Advanced Viral Packaging (SEO V4.0)...")
+    
+    # Context
+    is_short = (output_format == "9:16")
+    video_type_str = "reel" if is_short else "youtube"
+    
+    # --- SENIOR SEO STRATEGIST PROMPT ---
+    seo_system_prompt = f"""
+    You are a Senior YouTube Growth Strategist.
+    Goal: Maximize CTR and SEO using semantic keywords and psychological hooks.
+    
+    INPUT CONTEXT:
+    - VIDEO TYPE: {video_type_str}
+    - TRANSCRIPT: {transcript_text[:1500]}...
+    
+    OUTPUT REQUIREMENTS:
+    1. TITLE: [Primary Keyword] + [Power Word]. If reel, append #Shorts. Max 60 chars.
+    2. DESCRIPTION: "SEO Sandwich". Hook (2 sentences) + Deep Dive (100 words) + Tags.
+    3. TAGS: Mix of Broad, Exact, and Long-Tail tags.
+    4. THUMBNAIL_PROMPT: A highly detailed, cinematic image prompt for Flux AI. Focus on emotion, lighting (Rembrandt/Volumetric), and texture (8k, raw photo).
+    
+    Return ONLY valid JSON: {{ "title": "...", "description": "...", "tags": [...], "thumbnail_prompt": "..." }}
+    """
+
     try:
-        # Instructions ask for Mixed Language Metadata for maximum reach
-        prompt = f"""
-        Analyze transcript: '{transcript_text[:800]}...'. 
-        Output JSON with keys: 
-        - title (Viral Shorts style, Mix of English and Hindi/Urdu keywords, max 60 chars)
-        - description (SEO optimized English description with Urdu tags)
-        - tags (5 hashtags mixed languages)
-        - thumbnail_prompt (A highly detailed, cinematic image prompt for an AI art generator.)
-        """
         res = openai_client.chat.completions.create(
-            model="gpt-4o", messages=[{"role":"user", "content":prompt}], response_format={"type": "json_object"}
+            model="gpt-4o", 
+            messages=[{"role":"user", "content": seo_system_prompt}], 
+            response_format={"type": "json_object"}
         )
         meta = json.loads(res.choices[0].message.content)
         
-        logging.info(f"🎨 Generating Thumbnail: {meta.get('thumbnail_prompt')[:30]}...")
+        # --- THUMBNAIL GENERATION (Using the Expert Prompt) ---
+        thumb_prompt = meta.get('thumbnail_prompt', 'Cinematic viral video thumbnail')
+        logging.info(f"🎨 Generating Thumbnail: {thumb_prompt[:40]}...")
+        
+        flux_aspect = "9:16" if is_short else "16:9"
+        
         output = replicate.run(
             "black-forest-labs/flux-schnell",
-            input={"prompt": meta.get('thumbnail_prompt', 'Viral video thumbnail') + ", high resolution, 8k, cinematic lighting", "aspect_ratio": "9:16"}
+            input={
+                "prompt": thumb_prompt + ", highly detailed, 8k, cinematic lighting, photorealistic", 
+                "aspect_ratio": flux_aspect
+            }
         )
         thumb_url = str(output[0])
         return meta, thumb_url
+
     except Exception as e:
         logging.warning(f"Packaging failed: {e}")
-        return {}, None
+        return {
+            "title": "Viral Video #Shorts",
+            "description": "Watch this amazing video.",
+            "tags": ["viral", "trending"]
+        }, None
 
 # -------------------------------------------------------------------------
 # 🏭 MAIN TASK
@@ -278,15 +313,19 @@ def process_video_upload(self, form_data: dict):
         current_video = raw_path
         
         # 2. Smart Format Logic
-        # If Target is 9:16 AND Video is Landscape -> CROP
         if target_format == '9:16' and is_landscape:
             update("Converting to Vertical (9:16)...")
             crop_to_vertical(raw_path, processed_path)
             current_video = processed_path
             is_vertical_output = True
         else:
-            # If Target is 16:9, OR Video is already Vertical -> Keep Original
             is_vertical_output = (target_format == '9:16')
+            if is_landscape and not is_vertical_output:
+                current_video = raw_path # Keep original
+            elif not is_landscape and is_vertical_output:
+                current_video = raw_path # Already vertical
+            else:
+                 current_video = raw_path
             
         # 3. Silence Removal
         if form_data.get('remove_silence') == 'true':
@@ -294,15 +333,15 @@ def process_video_upload(self, form_data: dict):
             remove_silence(current_video, processed_path.replace(".mp4", "_cut.mp4"))
             current_video = processed_path.replace(".mp4", "_cut.mp4")
             
-        # 4. Transcription (AUTO-TRANSLATE TO ENGLISH)
+        # 4. Transcription
         transcript_text = "Video Content"
         if form_data.get('add_subtitles') == 'true':
-            update("Transcribing & Translating...")
+            update("Transcribing...")
             subprocess.run(["ffmpeg", "-y", "-i", current_video, "-q:a", "0", "-map", "a", audio_path], check=True)
             srt_content, transcript_text = generate_subtitles(audio_path)
             with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
             
-        # 5. Final Polish (Blur 10% Bottom, Clean Top)
+        # 5. Final Polish (Blur + Subs)
         update("Applying Polish...")
         apply_final_polish(
             current_video, 
@@ -312,9 +351,9 @@ def process_video_upload(self, form_data: dict):
             is_vertical=is_vertical_output
         )
         
-        # 6. Packaging
+        # 6. Packaging (SEO + Thumbnail)
         update("Creating Thumbnail & SEO...")
-        meta, thumb_url = generate_packaging(transcript_text, dur)
+        meta, thumb_url = generate_packaging(transcript_text, dur, target_format)
         
         # 7. Upload
         update("Uploading Final Video...")
