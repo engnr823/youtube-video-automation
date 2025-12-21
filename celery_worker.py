@@ -43,19 +43,18 @@ except ImportError:
     logging.warning("⚠️ OpenAI TTS client not found. Fallback will not work.")
 
 # --- CONSTANTS FOR VOICES AND AVATARS ---
-# Internal IDs used for routing logic
 MALE_VOICE_ID = "ErXwobaYiN019PkySvjV" 
 FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
 # --- FIXED CAST LIST (YOUR CINEMATIC CUSTOM IDS) ---
-# The new Smart Client will detect these are Talking Photos.
+# The new Smart HeyGen Client will detect these are Talking Photos.
 CAST_LIST = {
     "MALE_LEAD": "4343bfb447bf4028a48b598ae297f5dc",    # Your Custom Male
     "FEMALE_LEAD": "16a811adf1cc4b12bc6edd04c8fecffa",  # Your Custom Female
-    "NARRATOR": "4343bfb447bf4028a48b598ae297f5dc"      # Narrator (Male)
+    "NARRATOR": "4343bfb447bf4028a48b598ae297f5dc"      # Default Narrator
 }
 
-# Initial Fallback (Will be updated dynamically if this one is dead)
+# Initial Fallback
 SAFE_FALLBACK_AVATAR_ID = "4343bfb447bf4028a48b598ae297f5dc"
 
 # --- Utility Fix: Define missing ensure_dir function ---
@@ -93,6 +92,7 @@ try:
     from video_clients.heygen_client import (
         generate_heygen_video, 
         get_all_avatars, 
+        get_safe_fallback_id, 
         HeyGenError
     )
     HEYGEN_AVAILABLE = True
@@ -100,6 +100,7 @@ except ImportError as e:
     logging.error(f"❌ HEYGEN CLIENT NOT FOUND. Video generation will fail. IMPORT ERROR: {e}")
     generate_heygen_video = None
     get_all_avatars = None
+    get_safe_fallback_id = lambda: SAFE_FALLBACK_AVATAR_ID
     HEYGEN_AVAILABLE = False
 
 
@@ -125,13 +126,14 @@ else:
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # -------------------------
-# Royalty-Free Music Library
+# 🎶 Royalty-Free Music Library (Emotion Mapped)
 # -------------------------
 MUSIC_LIBRARY = {
     "motivational": "https://cdn.pixabay.com/audio/2022/07/22/powerful-8526.mp3",
-    "intense": "https://cdn.pixabay.com/audio/2023/12/06/trailer-mood-176840.mp3",
-    "sad": "https://cdn.pixabay.com/audio/2022/09/20/emotional-128225.mp3",
+    "intense": "https://cdn.pixabay.com/audio/2023/12/06/trailer-mood-176840.mp3", # Perfect for Noir
+    "sad": "https://cdn.pixabay.com/audio/2022/09/20/emotional-128225.mp3",        # Perfect for Rain/Drama
     "ambient": "https://cdn.pixabay.com/audio/2022/07/26/cinematic-ambient-11634.mp3",
+    "happy": "https://cdn.pixabay.com/audio/2022/10/05/upbeat-corporate-123.mp3",
     "default": "https://cdn.pixabay.com/audio/2022/07/22/powerful-8526.mp3"
 }
 
@@ -758,10 +760,25 @@ def background_generate_video(self, form_data: dict):
 
         if not final_pairs: raise RuntimeError("Zero video scenes generated.")
 
-        # --- 6. STITCHING ---
+        # --- 6. STITCHING & MUSIC MIXING ---
         update_status("Final Assembly...")
-        music_tone = blueprint.get("tone", "motivational")
-        music_url = MUSIC_LIBRARY.get(music_tone, MUSIC_LIBRARY["default"])
+        
+        # Smart Emotion Detection Logic
+        desc_text = (storyboard.get("video_title", "") + " " + storyboard.get("video_description", "")).lower()
+        detected_tone = "motivational" # default
+        
+        if any(x in desc_text for x in ["sad", "crying", "lost", "rain", "breakup", "sorrow", "pain"]):
+            detected_tone = "sad"
+        elif any(x in desc_text for x in ["detective", "noir", "mystery", "crime", "dark", "night", "tension", "secret"]):
+            detected_tone = "intense"
+        elif any(x in desc_text for x in ["peace", "calm", "nature", "morning", "relax"]):
+            detected_tone = "ambient"
+        elif any(x in desc_text for x in ["happy", "joy", "fun", "party", "success"]):
+            detected_tone = "happy"
+            
+        logging.info(f"🎵 Smart Music Detector: Selected '{detected_tone}' track based on script.")
+        
+        music_url = MUSIC_LIBRARY.get(detected_tone, MUSIC_LIBRARY["default"])
         music_path = os.path.join(tempfile.gettempdir(), f"music_{uuid.uuid4()}.mp3")
         try: download_to_file(music_url, music_path)
         except: music_path = None
@@ -775,18 +792,31 @@ def background_generate_video(self, form_data: dict):
         if not success: 
             return {"status": "error", "message": "Stitching failed during final assembly."}
         
-        # Audio Mix
+        # Audio Mix (Background Music)
         if music_path and os.path.exists(music_path):
+            mixed_output_path = final_output_path.replace(".mp4", "_mixed.mp4")
             cmd = [
                 "ffmpeg", "-y", "-i", temp_visual_path, "-stream_loop", "-1", "-i", music_path,
                 "-filter_complex", 
-                "[0:a]loudnorm=I=-14:LRA=7:tp=-2,volume=0.9[dia];[1:a]loudnorm=I=-22:LRA=7:tp=-2[bg];[dia][bg]amix=inputs=2:duration=first:weights=1 1[outa]",
-                "-map", "0:v", "-map", "[outa]",
-                "-c:v", "libx264", "-vf", "scale='min(720,iw)':-2", "-preset", "fast", "-crf", "23",
+                # Mix voice (100%) with music (15%)
+                "[0:a]volume=1.0[v];[1:a]volume=0.15[m];[v][m]amix=inputs=2:duration=first",
+                "-map", "0:v", "-map", "[outa]", # Note: filter output needs label [outa] or implicit use
+                # Adjusted filter complex for correct mapping
+                "-filter_complex", "[0:a]volume=1.0[v];[1:a]volume=0.15[m];[v][m]amix=inputs=2:duration=first[aout]",
+                "-map", "0:v", "-map", "[aout]",
+                "-c:v", "copy", # Copy video stream to save time (stitching already re-encoded if needed)
                 "-c:a", "aac", "-shortest", final_output_path
             ]
-            subprocess.run(cmd, check=True)
-        else: shutil.move(temp_visual_path, final_output_path)
+            # Use a slightly different command to ensure stability with 'copy'
+            subprocess.run([
+                "ffmpeg", "-y", "-i", temp_visual_path, "-stream_loop", "-1", "-i", music_path,
+                "-filter_complex", "[0:a]volume=1.0[v];[1:a]volume=0.15[m];[v][m]amix=inputs=2:duration=first[aout]",
+                "-map", "0:v", "-map", "[aout]",
+                "-c:v", "libx264", "-preset", "ultrafast", # Re-encode fast to ensure audio sync
+                "-c:a", "aac", "-shortest", final_output_path
+            ], check=True)
+        else:
+            shutil.move(temp_visual_path, final_output_path)
         
         # --- 7. UPLOAD & FINISH ---
         update_status("Uploading & Finalizing...")
