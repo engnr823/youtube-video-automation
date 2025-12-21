@@ -124,22 +124,6 @@ def format_timestamp(seconds):
     millis = int(td.microseconds / 1000)
     return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
-def ensure_font(temp_dir):
-    """
-    Downloads Arial.ttf to ensure subtitles work on Railway.
-    """
-    font_path = os.path.join(temp_dir, "Arial.ttf")
-    if not os.path.exists(font_path):
-        logging.info("📥 Downloading Portable Font (Arial)...")
-        url = "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial.ttf"
-        try:
-            r = requests.get(url, timeout=10)
-            with open(font_path, 'wb') as f:
-                f.write(r.content)
-        except:
-            logging.warning("Font download failed.")
-    return font_path
-
 # -------------------------------------------------------------------------
 # ✂️ VIDEO PROCESSING
 # -------------------------------------------------------------------------
@@ -205,7 +189,6 @@ def remove_silence_optimized(input_path, output_path, db_threshold=-30, min_sile
 
 def generate_subtitles_english(audio_path):
     logging.info("🎙️ Transcribing & Translating to English...")
-    # NOTE: 'translations' endpoint forces English output
     with open(audio_path, "rb") as audio_file:
         transcript = openai_client.audio.translations.create(
             model="whisper-1", file=audio_file, response_format="verbose_json"
@@ -220,38 +203,38 @@ def generate_subtitles_english(audio_path):
         full_text += text + " "
     return srt_content, full_text
 
-def apply_final_polish_with_font(input_path, srt_path, font_path, output_path, blur_watermarks=True, is_vertical=True):
-    logging.info(f"✨ Applying Final Polish (NUCLEAR VISIBILITY MODE)...")
+def apply_final_polish_simple(input_path, srt_path, output_path, blur_watermarks=True, is_vertical=True):
+    """
+    Applies Polish using NO FONT CONFIG (The 'Old Code' Method).
+    """
+    logging.info(f"✨ Applying Final Polish (Simple Mode)...")
     
-    # 1. Prepare Paths
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-    # Get directory of the font for fontsdir
-    font_dir = os.path.dirname(font_path).replace("\\", "/").replace(":", "\\:")
     
-    # 2. NUCLEAR VISIBILITY STYLE SETTINGS
-    # FontSize=85 (Huge)
-    # BorderStyle=3 (Opaque Box behind text - GUARANTEED VISIBILITY)
-    # BackColour=&H80000000 (Black background)
-    # MarginV=350 (Dead Center Lower Third)
+    # --- STYLE SETTINGS (NO FONT NAME) ---
+    # We REMOVE 'FontName=...' entirely.
+    # We keep the SIZE and BOX settings for visibility.
     if is_vertical:
-        style = "FontName=Arial,Alignment=2,MarginV=350,FontSize=85,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,BackColour=&H80000000,Outline=0,Shadow=0,Bold=1"
+        # FontSize=80 (Big)
+        # BorderStyle=3 (Box)
+        # BackColour (Black Background)
+        style = "Alignment=2,MarginV=280,FontSize=80,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,BackColour=&H80000000,Outline=0,Shadow=0,Bold=1"
     else:
-        style = "FontName=Arial,Alignment=2,MarginV=60,FontSize=45,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,BackColour=&H80000000,Outline=0,Shadow=0,Bold=1"
+        style = "Alignment=2,MarginV=60,FontSize=45,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,BackColour=&H80000000,Outline=0,Shadow=0,Bold=1"
 
     cmd = ["ffmpeg", "-y", "-i", input_path]
     filter_chain = []
     last_label = "0:v"
 
-    # 3. Blur Watermarks
+    # 1. Blur Watermarks
     if blur_watermarks and is_vertical:
         filter_chain.append(f"[{last_label}]crop=iw:ih*0.10:0:ih*0.90,boxblur=luma_radius=20[bot_blur]")
         filter_chain.append(f"[{last_label}][bot_blur]overlay=0:H-h[v_blurred]")
         last_label = "v_blurred"
 
-    # 4. Burn Subtitles (WITH FONTSDIR)
+    # 2. Burn Subtitles (Standard 'subtitles' filter, NO fontsdir)
     if os.path.exists(srt_path):
-        # We add 'fontsdir' parameter pointing to our temp folder.
-        filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{style}'[v_final]")
+        filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':force_style='{style}'[v_final]")
         last_label = "v_final"
 
     if filter_chain:
@@ -326,9 +309,7 @@ def process_video_upload(self, form_data: dict):
     try:
         def update(msg): self.update_state(state="PROGRESS", meta={"message": msg})
         
-        # 1. SETUP: Download Font
-        font_path = ensure_font(temp_dir)
-        
+        # 1. Ingest
         update("Downloading Video...")
         download_file(form_data['video_url'], raw_path)
         dur, w, h = get_video_info(raw_path)
@@ -366,12 +347,11 @@ def process_video_upload(self, form_data: dict):
                 with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
                 srt_exists = True
             
-        # 5. Final Polish (BIG SIZE)
+        # 5. Final Polish (Using Simple Mode - No Font Config)
         update("Applying Polish...")
-        apply_final_polish_with_font(
+        apply_final_polish_simple(
             current_video, 
             srt_path if srt_exists else None,
-            font_path,
             final_path,
             blur_watermarks=(form_data.get('blur_watermarks') == 'true'),
             is_vertical=is_vertical_output
