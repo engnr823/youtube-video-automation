@@ -1,4 +1,3 @@
-# file: celery_worker.py
 import os
 import sys
 import logging
@@ -11,6 +10,7 @@ import traceback
 import re
 from pathlib import Path
 from datetime import timedelta
+from string import Template
 
 # --- SETUP PATHS ---
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,12 +35,69 @@ if all([os.getenv("CLOUDINARY_CLOUD_NAME"), os.getenv("CLOUDINARY_API_KEY"), os.
         secure=True
     )
 
+# ===================================================================
+# --- 🧠 SYSTEM PROMPTS V4.0 (INTEGRATED)
+# ===================================================================
+
+SEO_METADATA_PROMPT = """
+# --- SYSTEM PROMPT V4.0 — SENIOR YOUTUBE SEO STRATEGIST
+You are a Senior YouTube Growth Strategist and SEO Algorithm Expert.
+Your goal is to engineer metadata that maximizes Click-Through Rate (CTR) and Search Ranking (SEO) by leveraging semantic keywords and psychological hooks.
+
+# --- INPUT CONTEXT
+VIDEO TYPE: ${video_type}
+SCRIPT CONTEXT: ${transcript}
+
+# --- OPTIMIZATION RULES (STRICT SEO)
+1. TITLE ENGINEERING (Max 60 chars):
+   - STRUCTURE: [Primary Keyword] + [Power Word/Emotional Hook].
+   - STRATEGY: Create a "Curiosity Gap". Don't reveal the ending.
+   - FORMAT: If VIDEO TYPE is "reel", strictly append "#Shorts".
+   - LANGUAGE: English (Optimized for Global Reach).
+
+2. DESCRIPTION "SEO SANDWICH" STRUCTURE:
+   - SECTION 1 (The Hook): 2 sentences. First sentence MUST include the Primary Keyword verbatim.
+   - SECTION 2 (The Deep Dive): A detailed 100-word summary of value. Use "LSI Keywords".
+   - SECTION 3 (Key Takeaways): A bulleted list of 3-4 things the viewer will learn.
+   - SECTION 4 (Call to Action): "Subscribe for more."
+
+3. TAGS & KEYWORDS:
+   - Mix of Broad, Exact Match, and Long-Tail tags.
+
+# --- OUTPUT SCHEMA (STRICT JSON)
+Return ONLY a valid JSON object:
+{
+  "title": "Optimized Clickable Title #Shorts",
+  "description": "Full SEO-rich description...",
+  "tags": ["tag1", "tag2", "tag3"],
+  "primary_keyword": "extracted_keyword"
+}
+"""
+
+THUMBNAIL_ARTIST_PROMPT = """
+# --- SYSTEM PROMPT V4.0 — THUMBNAIL ARTIST
+You are an expert YouTube Thumbnail Artist.
+Your job is to write ONE detailed text-to-image prompt for the Flux AI generator based on this video context: ${context}
+
+# --- OUTPUT REQUIREMENTS
+Write a single, highly detailed image prompt. Focus on:
+1. The most emotional/dramatic moment.
+2. High Emotion in facial expressions (Fear, Joy, Shock).
+3. Cinematic Lighting: "Rembrandt lighting", "Volumetric fog", or "Rim light".
+4. Texture Quality: "Raw photo", "f/1.8 aperture", "4k", "detailed skin texture".
+5. Composition: "Rule of thirds", "Depth of field".
+
+STRICT NEGATIVE CONSTRAINTS:
+--no text, words, logos, ui, cartoon, anime, plastic, 3d render, doll, low resolution, blurry
+
+Output ONLY the raw prompt text.
+"""
+
 # -------------------------------------------------------------------------
 # 🛠️ HELPER FUNCTIONS
 # -------------------------------------------------------------------------
 
 def transform_drive_url(url):
-    """Converts a Google Drive 'View' link to a 'Direct Download' link."""
     patterns = [r'/file/d/([a-zA-Z0-9_-]+)', r'id=([a-zA-Z0-9_-]+)']
     file_id = None
     for p in patterns:
@@ -53,7 +110,6 @@ def transform_drive_url(url):
     return url
 
 def download_file(url, dest_path):
-    """Downloads video from any public link."""
     if "drive.google.com" in url:
         download_url = transform_drive_url(url)
     else:
@@ -65,8 +121,6 @@ def download_file(url, dest_path):
         with requests.get(download_url, stream=True, timeout=300, headers=headers) as r:
             if r.status_code in [401, 403]:
                 raise RuntimeError("⛔ Access Denied. Make sure link is Public.")
-            if "text/html" in r.headers.get('Content-Type', ''):
-                 raise RuntimeError("⛔ Link returned HTML page, not video file.")
             r.raise_for_status()
             with open(dest_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
@@ -76,17 +130,12 @@ def download_file(url, dest_path):
         raise RuntimeError(f"Download failed: {str(e)}")
 
 def get_video_info(file_path):
-    """Returns duration, width, height using FFprobe."""
     try:
-        cmd = [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,duration", 
-            "-of", "json", file_path
-        ]
+        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,duration", "-of", "json", file_path]
         result = subprocess.check_output(cmd).decode('utf-8')
         info = json.loads(result)['streams'][0]
         return float(info.get('duration', 0)), int(info['width']), int(info['height'])
-    except Exception:
+    except:
         return 0.0, 1080, 1920
 
 def format_timestamp(seconds):
@@ -99,21 +148,11 @@ def format_timestamp(seconds):
     return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
 # -------------------------------------------------------------------------
-# ✂️ VIDEO PROCESSING FUNCTIONS
+# ✂️ VIDEO PROCESSING (OPTIMIZED ENGINE)
 # -------------------------------------------------------------------------
 
-def crop_to_vertical(input_path, output_path):
-    logging.info("📐 Auto-Cropping to Vertical (9:16)...")
-    cmd = [
-        "ffmpeg", "-y", "-i", input_path,
-        "-vf", "scale=-1:1920,crop=1080:1920:((iw-1080)/2):0,setsar=1",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "copy",
-        output_path
-    ]
-    subprocess.run(cmd, check=True)
-
-def remove_silence(input_path, output_path, db_threshold=-30, min_silence_duration=0.6):
-    logging.info("✂️ Processing Jump Cuts...")
+def remove_silence_optimized(input_path, output_path, db_threshold=-30, min_silence_duration=0.6):
+    logging.info("✂️ Processing Jump Cuts (High Quality)...")
     try:
         cmd = ["ffmpeg", "-i", input_path, "-af", f"silencedetect=noise={db_threshold}dB:d={min_silence_duration}", "-f", "null", "-"]
         result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
@@ -124,10 +163,10 @@ def remove_silence(input_path, output_path, db_threshold=-30, min_silence_durati
             if "silence_start" in line:
                 silence_starts.append(float(line.split("silence_start: ")[1]))
             if "silence_end" in line:
-                if "silence_end" in line: silence_ends.append(float(line.split("silence_end: ")[1].split(" ")[0]))
+                silence_ends.append(float(line.split("silence_end: ")[1].split(" ")[0]))
 
         if not silence_starts:
-            logging.info("No silence found. Skipping cut.")
+            logging.info("No silence found. Copying.")
             shutil.copy(input_path, output_path)
             return
 
@@ -152,18 +191,19 @@ def remove_silence(input_path, output_path, db_threshold=-30, min_silence_durati
         filter_complex += "".join([f"[v{i}][a{i}]" for i in range(concat_idx)])
         filter_complex += f"concat=n={concat_idx}:v=1:a=1[outv][outa]"
 
+        # OPTIMIZATION: Use -crf 18 to PRESERVE QUALITY in this intermediate step
         subprocess.run([
             "ffmpeg", "-y", "-i", input_path, "-filter_complex", filter_complex,
-            "-map", "[outv]", "-map", "[outa]", "-c:v", "libx264", output_path
+            "-map", "[outv]", "-map", "[outa]", "-c:v", "libx264", "-crf", "18", "-preset", "fast", output_path
         ], check=True)
     except Exception:
         logging.warning("Silence removal failed, using original.")
         shutil.copy(input_path, output_path)
 
-def generate_subtitles(audio_path):
-    logging.info("🎙️ Transcribing & Translating to English (Standard Alphabet)...")
+def generate_subtitles_english(audio_path):
+    logging.info("🎙️ Transcribing & Translating to English...")
+    # Forces English translation for all input languages
     with open(audio_path, "rb") as audio_file:
-        # 'translations' forces output to English, ensuring perfect rendering on all servers
         transcript = openai_client.audio.translations.create(
             model="whisper-1", file=audio_file, response_format="verbose_json"
         )
@@ -177,114 +217,103 @@ def generate_subtitles(audio_path):
         full_text += text + " "
     return srt_content, full_text
 
-def apply_final_polish(input_path, srt_path, output_path, blur_watermarks=True, is_vertical=True):
-    logging.info(f"✨ Applying Gold Standard Polish (Vertical: {is_vertical})...")
+def apply_final_polish_optimized(input_path, srt_path, output_path, blur_watermarks=True, is_vertical=True, do_crop=False):
+    """
+    COMBINED PASS: Crop + Blur + Subtitles.
+    Uses 'MarginV=550' (The 'First Code' Position) for safety.
+    """
+    logging.info(f"✨ Applying Combined Polish (Crop: {do_crop}, Vertical: {is_vertical})...")
     
-    # --- GOLD STANDARD STYLING (2025) ---
-    # Color: White (#FFFFFF)
-    # Outline: Heavy Black (#000000) for contrast
-    # BorderStyle: 1 (Outline Only - NO BOX)
-    
+    # --- STYLE (Safe Zone) ---
     if is_vertical:
-        # SHORTS (9:16)
-        # Position: MarginV=550. This lifts the text UP into the "Lower Middle" Safe Zone.
-        # It sits ABOVE the channel name/caption/subscribe button.
-        # Size: 26 (Large and Readable)
+        # MarginV=550 = Upper-Lower-Middle. Safe from TikTok/Reels UI.
         style = "Alignment=2,MarginV=550,FontSize=26,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Bold=1"
     else:
-        # YOUTUBE STANDARD (16:9)
-        # Position: MarginV=80. Lifted slightly to avoid Red Progress Bar.
-        # Size: 18 (Standard Readable)
         style = "Alignment=2,MarginV=80,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Bold=1"
 
     safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
     cmd = ["ffmpeg", "-y", "-i", input_path]
-    
-    filter_chain = ""
-    current_stream = "0:v"
-    
-    # --- BLUR LOGIC (Bottom 10% Only) ---
-    # Hides the original Watermark/Username at the very bottom
+    filter_chain = []
+    last_label = "0:v"
+
+    # 1. CROP
+    if do_crop:
+        filter_chain.append(f"[{last_label}]scale=-1:1920,crop=1080:1920:((iw-1080)/2):0,setsar=1[v_cropped]")
+        last_label = "v_cropped"
+
+    # 2. BLUR WATERMARKS
     if blur_watermarks and is_vertical:
-        # Crop bottom 10% -> Blur -> Overlay back
-        filter_chain += f"[{current_stream}]crop=iw:ih*0.10:0:ih*0.90,boxblur=luma_radius=20[bot_blur];" \
-                        f"[{current_stream}][bot_blur]overlay=0:H-h[v_blurred]"
-        current_stream = "v_blurred" 
+        filter_chain.append(f"[{last_label}]crop=iw:ih*0.10:0:ih*0.90,boxblur=luma_radius=20[bot_blur]")
+        filter_chain.append(f"[{last_label}][bot_blur]overlay=0:H-h[v_blurred]")
+        last_label = "v_blurred"
 
-    # --- SUBTITLE LOGIC ---
+    # 3. SUBTITLES
     if os.path.exists(srt_path):
-        if filter_chain:
-            # Chain exists
-            filter_chain += f";[{current_stream}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
-        else:
-            # Start chain
-            filter_chain = f"[{current_stream}]subtitles='{safe_srt}':force_style='{style}'[v_final]"
-        current_stream = "v_final"
+        filter_chain.append(f"[{last_label}]subtitles='{safe_srt}':force_style='{style}'[v_final]")
+        last_label = "v_final"
 
-    # --- EXECUTE ---
+    # EXECUTE
     if filter_chain:
-        cmd.extend(["-filter_complex", filter_chain, "-map", f"[{current_stream}]", "-map", "0:a?", "-c:v", "libx264", "-c:a", "copy"])
+        full_filter = ";".join(filter_chain)
+        # Use CRF 23 for final output
+        cmd.extend(["-filter_complex", full_filter, "-map", f"[{last_label}]", "-map", "0:a?", "-c:v", "libx264", "-crf", "23", "-preset", "fast", "-c:a", "copy"])
     else:
         cmd.extend(["-c", "copy"])
         
     cmd.append(output_path)
     subprocess.run(cmd, check=True)
 
-def generate_packaging(transcript_text, duration, output_format="9:16"):
-    logging.info("📦 Generating Viral Packaging...")
-    
+def generate_packaging_v4(transcript_text, duration, output_format="9:16"):
+    logging.info("📦 Generating V4.0 Packaging...")
     is_short = (output_format == "9:16")
     video_type_str = "reel" if is_short else "youtube"
 
-    # --- SENIOR SEO STRATEGIST PROMPT (Integrated) ---
-    seo_prompt = f"""
-    You are a Senior YouTube Growth Strategist.
-    Goal: Maximize CTR and SEO using semantic keywords and psychological hooks.
-    
-    INPUT CONTEXT:
-    - VIDEO TYPE: {video_type_str}
-    - TRANSCRIPT: {transcript_text[:1500]}...
-    
-    OUTPUT REQUIREMENTS:
-    1. TITLE: [Primary Keyword] + [Power Word]. If reel, append #Shorts. Max 60 chars.
-    2. DESCRIPTION: "SEO Sandwich". Hook (2 sentences) + Deep Dive (100 words) + Tags.
-    3. TAGS: Mix of Broad, Exact, and Long-Tail tags.
-    4. THUMBNAIL_PROMPT: A highly detailed, cinematic image prompt for Flux AI. Focus on emotion, lighting (Rembrandt/Volumetric), and texture (8k, raw photo).
-    
-    Return ONLY valid JSON: {{ "title": "...", "description": "...", "tags": [...], "thumbnail_prompt": "..." }}
-    """
-
+    # 1. METADATA (using V4 prompt)
     try:
+        formatted_prompt = Template(SEO_METADATA_PROMPT).safe_substitute(
+            video_type=video_type_str,
+            transcript=transcript_text[:2500]
+        )
         res = openai_client.chat.completions.create(
             model="gpt-4o", 
-            messages=[{"role":"user", "content": seo_prompt}], 
+            messages=[{"role":"user", "content": formatted_prompt}], 
             response_format={"type": "json_object"}
         )
         meta = json.loads(res.choices[0].message.content)
+    except Exception as e:
+        logging.error(f"Metadata Gen Failed: {e}")
+        meta = {"title": "Viral Video", "description": "", "tags": []}
+
+    # 2. THUMBNAIL (using V4 prompt logic)
+    try:
+        # Pass the generated description to the Artist Prompt
+        context_data = meta.get('description', transcript_text[:500])
+        thumb_gen_prompt = Template(THUMBNAIL_ARTIST_PROMPT).safe_substitute(context=context_data)
         
-        # --- THUMBNAIL ARTIST ---
-        thumb_prompt = meta.get('thumbnail_prompt', 'Viral video thumbnail')
-        logging.info(f"🎨 Generating Thumbnail: {thumb_prompt[:40]}...")
+        res_thumb = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role":"user", "content": thumb_gen_prompt}]
+        )
+        flux_prompt = res_thumb.choices[0].message.content.strip()
+        
+        logging.info(f"🎨 Flux Prompt: {flux_prompt[:50]}...")
         
         flux_aspect = "9:16" if is_short else "16:9"
-        
         output = replicate.run(
             "black-forest-labs/flux-schnell",
             input={
-                "prompt": thumb_prompt + ", highly detailed, 8k, cinematic lighting, photorealistic", 
+                "prompt": flux_prompt + ", photorealistic, 8k, highly detailed", 
                 "aspect_ratio": flux_aspect
             }
         )
         thumb_url = str(output[0])
-        return meta, thumb_url
-
     except Exception as e:
-        logging.warning(f"Packaging failed: {e}")
-        return {
-            "title": "Viral Video #Shorts",
-            "description": "Watch this amazing video.",
-            "tags": ["viral", "trending"]
-        }, None
+        logging.error(f"Thumbnail Gen Failed: {e}")
+        thumb_url = None
+        flux_prompt = "Error"
+
+    meta['thumbnail_prompt'] = flux_prompt
+    return meta, thumb_url
 
 # -------------------------------------------------------------------------
 # 🏭 MAIN TASK
@@ -295,7 +324,6 @@ def process_video_upload(self, form_data: dict):
     temp_dir = f"/tmp/edit_{task_id}"
     os.makedirs(temp_dir, exist_ok=True)
     
-    # Paths
     raw_path = os.path.join(temp_dir, "raw.mp4")
     processed_path = os.path.join(temp_dir, "processed.mp4")
     final_path = os.path.join(temp_dir, "final.mp4")
@@ -308,59 +336,48 @@ def process_video_upload(self, form_data: dict):
         # 1. Ingest
         update("Downloading Video...")
         download_file(form_data['video_url'], raw_path)
-        
         dur, w, h = get_video_info(raw_path)
         
-        # Determine Format
         target_format = form_data.get('output_format', '9:16')
         is_landscape = w > h
+        need_crop = (target_format == '9:16' and is_landscape)
+        is_vertical_output = (target_format == '9:16')
         
         current_video = raw_path
-        
-        # 2. Smart Format Logic
-        if target_format == '9:16' and is_landscape:
-            update("Converting to Vertical (9:16)...")
-            crop_to_vertical(raw_path, processed_path)
-            current_video = processed_path
-            is_vertical_output = True
-        else:
-            is_vertical_output = (target_format == '9:16')
-            # If we don't crop, we copy raw to processed to keep logic simple
-            if current_video == raw_path:
-                shutil.copy(raw_path, processed_path)
-                current_video = processed_path
-            
-        # 3. Silence Removal
+
+        # 2. Silence Removal (Pass 1 - High Quality)
         if form_data.get('remove_silence') == 'true':
             update("Removing Silence...")
-            remove_silence(current_video, processed_path.replace(".mp4", "_cut.mp4"))
-            current_video = processed_path.replace(".mp4", "_cut.mp4")
-            
-        # 4. Transcription & Translation
+            remove_silence_optimized(current_video, processed_path)
+            current_video = processed_path
+        
+        # 3. Transcription (Force English)
         transcript_text = "Video Content"
+        srt_exists = False
         if form_data.get('add_subtitles') == 'true':
-            update("Transcribing & Translating...")
+            update("Transcribing to English...")
             subprocess.run(["ffmpeg", "-y", "-i", current_video, "-q:a", "0", "-map", "a", audio_path], check=True)
-            # Use English Translations for global reach & font safety
-            srt_content, transcript_text = generate_subtitles(audio_path)
+            srt_content, transcript_text = generate_subtitles_english(audio_path)
             with open(srt_path, "w", encoding="utf-8") as f: f.write(srt_content)
+            srt_exists = True
             
-        # 5. Final Polish
+        # 4. Final Polish (Pass 2 - Crop + Blur + Subs)
         update("Applying Polish...")
-        apply_final_polish(
+        apply_final_polish_optimized(
             current_video, 
-            srt_path if form_data.get('add_subtitles') == 'true' else None,
+            srt_path if srt_exists else None,
             final_path,
             blur_watermarks=(form_data.get('blur_watermarks') == 'true'),
-            is_vertical=is_vertical_output
+            is_vertical=is_vertical_output,
+            do_crop=need_crop
         )
         
-        # 6. Packaging
-        update("Creating Thumbnail & SEO...")
-        meta, thumb_url = generate_packaging(transcript_text, dur, target_format)
+        # 5. Packaging (V4.0 SEO)
+        update("Generating Assets...")
+        meta, thumb_url = generate_packaging_v4(transcript_text, dur, target_format)
         
-        # 7. Upload
-        update("Uploading Final Video...")
+        # 6. Upload
+        update("Uploading...")
         cloud_res = cloudinary.uploader.upload(final_path, folder="viral_edits", resource_type="video")
         
         return {
@@ -368,7 +385,7 @@ def process_video_upload(self, form_data: dict):
             "video_url": cloud_res.get("secure_url"),
             "thumbnail_url": thumb_url,
             "metadata": meta,
-            "transcript_srt": srt_content if os.path.exists(srt_path) else None
+            "transcript_srt": srt_content if srt_exists else None
         }
 
     except Exception as e:
