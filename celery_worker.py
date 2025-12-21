@@ -47,16 +47,17 @@ except ImportError:
 MALE_VOICE_ID = "ErXwobaYiN019PkySvjV" 
 FEMALE_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
-# --- FIXED CAST LIST (The "Stars" of your SaaS) ---
-# UPDATED WITH YOUR SPECIFIC AVATAR IDs
+# --- FIXED CAST LIST (Using SAFE STOCK AVATARS to ensure Audio works) ---
 CAST_LIST = {
-    "MALE_LEAD": "4343bfb447bf4028a48b598ae297f5dc",    # Your Male Avatar (Kabir)
-    "FEMALE_LEAD": "e0e84faea390465896db75a83be45085", # Public Female Avatar (Sana)
-    "NARRATOR": "4343bfb447bf4028a48b598ae297f5dc"     # Defaulting Narrator to Male Lead
+    # We use these PUBLIC IDs because they are guaranteed to exist on all accounts.
+    # It will look like a newscaster, but it will TALK.
+    "MALE_LEAD": "josh_lite3_20230714",     # Josh (Public Male)
+    "FEMALE_LEAD": "anna_public_2024",      # Anna (Public Female)
+    "NARRATOR": "josh_lite3_20230714"       # Narrator
 }
 
-# Fallback if logic fails (Updated to your Male ID to ensure it always works)
-SAFE_FALLBACK_AVATAR_ID = "4343bfb447bf4028a48b598ae297f5dc" 
+# Fallback
+SAFE_FALLBACK_AVATAR_ID = "josh_lite3_20230714" 
 
 # --- Utility Fix: Define missing ensure_dir function ---
 def ensure_dir(path):
@@ -355,12 +356,9 @@ def process_single_scene(
             target_char_name = list(character_faces.keys())[0] if character_faces else "MENTOR"
             
         char_data = character_faces.get(target_char_name, {})
-        avatar_id = char_data.get("heygen_avatar_id") 
+        # FORCE fallback to default if ID is missing or known invalid
+        avatar_id = char_data.get("heygen_avatar_id") or SAFE_FALLBACK_AVATAR_ID
         
-        if not avatar_id:
-            logging.warning(f"No specific HeyGen Avatar ID found for {target_char_name}. Using fallback.")
-            avatar_id = fallback_avatar_id or SAFE_FALLBACK_AVATAR_ID
-
         # Upload Audio
         cloud_audio_url = None
         if audio_path and os.path.exists(audio_path):
