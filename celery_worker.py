@@ -36,7 +36,6 @@ cloudinary.config(
 # -------------------------------------------------
 # HELPERS
 # -------------------------------------------------
-
 def load_prompt_from_file(filepath, default_text):
     try:
         full_path = os.path.join(os.getcwd(), filepath)
@@ -48,12 +47,7 @@ def load_prompt_from_file(filepath, default_text):
     return default_text
 
 def sanitize_text_for_ffmpeg(text):
-    """
-    Cleans text to prevent FFmpeg crashes.
-    Removes quotes, escapes colons and commas.
-    """
     if not text: return ""
-    # Remove quotes, escape colons (: -> \:) and commas (, -> \,)
     return text.replace("'", "").replace('"', '').replace(":", "\\:").replace(",", "\\,")
 
 def transform_drive_url(url):
@@ -98,12 +92,11 @@ def ensure_font(tmp_dir):
     return font_path
 
 # -------------------------------------------------
-# AI METADATA & HOOKS
+# AI GENERATORS
 # -------------------------------------------------
 def generate_expert_metadata(transcript_text):
     default_prompt = "Generate JSON with 'title', 'description', 'tags'."
     system_instruction = load_prompt_from_file("prompts/prompt_youtube_metadata_generator.txt", default_prompt)
-
     try:
         response = openai_client.chat.completions.create(
             model="gpt-4o",
@@ -118,11 +111,10 @@ def generate_expert_metadata(transcript_text):
         return {"title": "Viral Video", "description": "", "tags": ""}
 
 def generate_thumbnail_hook(transcript_text, title):
-    """Generates a 3-5 word hook for the visual overlay."""
     system_prompt = (
         "You are a Viral Content Expert. "
-        "Create a 3 to 5 word 'Visual Hook' text that will be overlaid on the video thumbnail. "
-        "It must be short, punchy, and shocking. Return ONLY the text."
+        "Create a 3 to 5 word 'Visual Hook' text for a YouTube Thumbnail. "
+        "Return ONLY the text. No quotes."
     )
     try:
         response = openai_client.chat.completions.create(
@@ -137,91 +129,41 @@ def generate_thumbnail_hook(transcript_text, title):
         return title.upper()[:20]
 
 # -------------------------------------------------
-# THUMBNAIL GENERATOR (FIXED)
-# -------------------------------------------------
-def generate_thumbnail(video_path, font_path, output_path, text_overlay, duration, width):
-    """
-    Generates a thumbnail with centered text.
-    Uses -update 1 to fix the FFmpeg image sequence error.
-    """
-    try:
-        timestamp = duration / 2
-        safe_font = sanitize_text_for_ffmpeg(font_path)
-        safe_text = sanitize_text_for_ffmpeg(text_overlay)
-        
-        # Calculate large font size for the center text
-        font_size = int(width / 8)
-        
-        # Draw Text centered with a semi-transparent black box
-        vf = (
-            f"drawtext=fontfile='{safe_font}':"
-            f"text='{safe_text}':"
-            f"fontcolor=white:"
-            f"fontsize={font_size}:"
-            f"x=(w-text_w)/2:y=(h-text_h)/2:"
-            f"box=1:boxcolor=black@0.6:boxborderw=20"
-        )
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(timestamp),
-            "-i", video_path,
-            "-vf", vf,
-            "-frames:v", "1",
-            "-update", "1", # CRITICAL FIX for single image output
-            "-q:v", "2",
-            output_path
-        ]
-        subprocess.run(cmd, check=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Thumbnail Error: {e}")
-        return False
-
-# -------------------------------------------------
-# RENDER ENGINE (HORMOZI STYLE)
+# RENDER ENGINE
 # -------------------------------------------------
 def render_video(input_video, srt_file, font_path, output_video, channel_name, width, height):
     is_vertical = height > width
 
-    # 
-    
-    # 1. SETUP SIZES
     if is_vertical:
         play_res = "PlayResX=1080,PlayResY=1920"
-        # Subtitles: Make them BIG
-        sub_font_size = 26 
-        sub_margin_v = 200 # Lifted up from bottom UI
+        # MASSIVE INCREASE for visibility on mobile
+        sub_font_size = 80 
+        sub_margin_v = 350 # Higher up
         
-        # Branding: STRICTLY 30 as requested
+        # Fixed Branding
         brand_size = 30
-        brand_x = "w-text_w-20" # Top Right
+        brand_x = "w-text_w-20"
         brand_y = "50"
     else:
         play_res = "PlayResX=1920,PlayResY=1080"
-        sub_font_size = 34
-        sub_margin_v = 90
+        sub_font_size = 60
+        sub_margin_v = 100
         
         brand_size = 30
         brand_x = "w-text_w-30"
         brand_y = "30"
 
     # 
-
-    # 2. SUBTITLE STYLE (The "Hormozi" Box)
-    # BorderStyle=3 -> Opaque Box (Solid background)
-    # BackColour=&H80000000 -> Black with 50% opacity (Standard format: &H(Alpha)(Blue)(Green)(Red))
-    # We use &H00000000 (Opaque Black) for the box to ensure text readability
     sub_style = (
         f"FontName=Arial,"
         f"FontSize={sub_font_size},"
-        f"PrimaryColour=&H00FFFFFF,"   # White Text
+        f"PrimaryColour=&H00FFFFFF,"   # White
         f"OutlineColour=&H00000000,"   # Black Outline
-        f"BackColour=&H60000000,"      # Semi-Opaque Black Box
-        f"BorderStyle=3,"              # 3 = BOX MODE
+        f"BackColour=&H60000000,"      # Black Box (60% Alpha)
+        f"BorderStyle=3,"              # Opaque Box Mode
         f"Outline=1,"
         f"Shadow=0,"
-        f"Alignment=2,"                # Bottom Center
+        f"Alignment=2,"
         f"MarginV={sub_margin_v},"
         f"WrapStyle=2,"
         f"{play_res}"
@@ -232,17 +174,15 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     font_dir = os.path.dirname(safe_font)
     safe_brand = sanitize_text_for_ffmpeg(channel_name)
 
-    # 3. BRANDING (Top Right, Animated)
     branding_filter = (
         f"drawtext=fontfile='{safe_font}':"
         f"text='{safe_brand}':"
-        f"fontcolor=#FFD700:" # Gold
+        f"fontcolor=#FFD700:" 
         f"fontsize={brand_size}:"
         f"x={brand_x}:y={brand_y}:"
-        f"alpha='0.8+0.2*sin(2*PI*t/2)'" # Subtle Pulse
+        f"alpha='0.8+0.2*sin(2*PI*t/2)'"
     )
 
-    # 4. SUBS
     subtitle_filter = (
         f"subtitles='{safe_srt}':"
         f"fontsdir='{font_dir}':"
@@ -260,6 +200,40 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
         output_video
     ]
     subprocess.run(cmd, check=True)
+
+def generate_thumbnail(video_path, font_path, output_path, text_overlay, duration, width):
+    try:
+        timestamp = duration / 2
+        safe_font = sanitize_text_for_ffmpeg(font_path)
+        safe_text = sanitize_text_for_ffmpeg(text_overlay)
+        
+        # Make font massive (1/6th of width)
+        font_size = int(width / 6)
+        
+        # Box with wider padding (boxborderw=40) for "Design" look
+        vf = (
+            f"drawtext=fontfile='{safe_font}':"
+            f"text='{safe_text}':"
+            f"fontcolor=white:"
+            f"fontsize={font_size}:"
+            f"x=(w-text_w)/2:y=(h-text_h)/2:"
+            f"box=1:boxcolor=black@0.7:boxborderw=40"
+        )
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(timestamp),
+            "-i", video_path,
+            "-vf", vf,
+            "-frames:v", "1",
+            "-update", "1",
+            "-q:v", "2",
+            output_path
+        ]
+        subprocess.run(cmd, check=True)
+        return True
+    except:
+        return False
 
 # -------------------------------------------------
 # CELERY TASK
@@ -279,14 +253,12 @@ def process_video_upload(self, form_data):
     try:
         def update(msg): self.update_state(state="PROGRESS", meta={"message": msg})
 
-        # 1. DOWNLOAD
         update("Downloading")
         download_file(form_data["video_url"], raw)
         duration, w, h = get_video_info(raw)
         font = ensure_font(tmp)
         channel = form_data.get("channel_name", "@ViralShorts")
 
-        # 2. AUDIO & TRANSCRIPT
         update("AI Analysis")
         subprocess.run(["ffmpeg", "-y", "-i", raw, "-map", "a", "-q:a", "0", audio], check=True)
         
@@ -295,27 +267,20 @@ def process_video_upload(self, form_data):
         )
         full_text = transcript.text
 
-        # 3. GENERATE METADATA & HOOKS
         seo_data = generate_expert_metadata(full_text)
-        thumb_text = generate_thumbnail_hook(full_text, seo_data.get("title", "Must Watch"))
+        thumb_text = generate_thumbnail_hook(full_text, seo_data.get("title", ""))
 
-        # 4. GENERATE SRT FILE
         srt_content = ""
         for i, seg in enumerate(transcript.segments):
             srt_content += f"{i+1}\n{format_ts(seg.start)} --> {format_ts(seg.end)}\n{seg.text.strip()}\n\n"
-        
-        with open(srt, "w", encoding="utf-8") as f:
-            f.write(srt_content)
+        with open(srt, "w", encoding="utf-8") as f: f.write(srt_content)
 
-        # 5. RENDER
         update("Rendering")
         render_video(raw, srt, font, final, channel, w, h)
 
-        # 6. THUMBNAIL
-        update("Generating Thumbnail")
+        update("Thumbnail")
         has_thumb = generate_thumbnail(final, font, thumb, thumb_text, duration, w)
 
-        # 7. UPLOAD
         update("Uploading")
         vid_res = cloudinary.uploader.upload(final, resource_type="video", folder="viral_edits")
         
@@ -324,12 +289,13 @@ def process_video_upload(self, form_data):
             thumb_res = cloudinary.uploader.upload(thumb, resource_type="image", folder="viral_thumbnails")
             thumb_url = thumb_res["secure_url"]
 
+        # EXPLICIT RETURN OF TRANSCRIPT TEXT
         return {
             "status": "success",
             "video_url": vid_res["secure_url"],
             "thumbnail_url": thumb_url,
             "metadata": seo_data,
-            "transcript_text": full_text  # RETURNED EXPLICITLY
+            "transcript_text": full_text 
         }
 
     except Exception as e:
