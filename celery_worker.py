@@ -13,11 +13,12 @@ from datetime import timedelta
 
 import cloudinary
 import cloudinary.uploader
+import replicate  # Added Replicate Client
 from openai import OpenAI
 from celery_init import celery
 
 # -------------------------------------------------
-# CONFIG
+# CONFIGURATION
 # -------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +28,9 @@ logging.basicConfig(
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
+# Ensure REPLICATE_API_TOKEN is in your .env file
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
+
 cloudinary.config(
     cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
     api_key=os.getenv("CLOUDINARY_API_KEY"),
@@ -35,7 +39,7 @@ cloudinary.config(
 )
 
 # -------------------------------------------------
-# UTILS
+# UTILITIES
 # -------------------------------------------------
 def load_prompt(filepath, default):
     try:
@@ -48,7 +52,9 @@ def load_prompt(filepath, default):
     return default
 
 def sanitize(text):
+    """Escapes special characters for FFmpeg."""
     if not text: return ""
+    # Remove quotes, escape colons and commas
     return text.replace("'", "").replace('"', '').replace(":", "\\:").replace(",", "\\,")
 
 def transform_drive_url(url):
@@ -110,42 +116,55 @@ def generate_metadata(transcript):
     except:
         return {"title": "Viral Video", "description": "", "tags": ""}
 
-def generate_thumbnail_image(transcript, title, tmp_dir):
-    """Generates an AI Image using DALL-E 3 instead of a screenshot."""
-    img_prompt_sys = load_prompt("prompts/prompt_image_synthesizer.txt", "Describe a high quality youtube thumbnail background image without text.")
+def generate_thumbnail_image(transcript, title, tmp_dir, width, height):
+    """
+    Generates an AI Image using Replicate (Flux-Schnell).
+    """
+    img_prompt_sys = load_prompt("prompts/prompt_image_synthesizer.txt", "Describe a high quality youtube thumbnail background image.")
     
-    # 1. Get Visual Description
+    # 1. Get Visual Prompt from GPT-4
     try:
         desc_res = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": img_prompt_sys},
-                {"role": "user", "content": f"Title: {title}\nTranscript: {transcript[:1000]}"}
+                {"role": "user", "content": f"Title: {title}\nTranscript: {transcript[:800]}"}
             ]
         )
-        visual_prompt = desc_res.choices[0].message.content.strip()[:1000] # Limit char count
+        # Limit prompt length for Flux
+        visual_prompt = desc_res.choices[0].message.content.strip()[:900]
     except:
-        visual_prompt = f"High quality cinematic photo for video: {title}"
+        visual_prompt = f"Cinematic hyper-realistic photo representing {title}, high emotional impact, 8k resolution, trending on artstation."
 
-    # 2. Generate Image
+    # 2. Determine Aspect Ratio
+    aspect_ratio = "9:16" if height > width else "16:9"
+
+    # 3. Generate Image using Replicate (Flux)
     try:
-        img_res = openai_client.images.generate(
-            model="dall-e-3",
-            prompt=visual_prompt,
-            size="1024x1792", # Vertical aspect ratio approx
-            quality="standard",
-            n=1
+        logging.info(f"🎨 Generating Flux Image ({aspect_ratio}): {visual_prompt[:50]}...")
+        
+        output = replicate.run(
+            "black-forest-labs/flux-schnell",
+            input={
+                "prompt": visual_prompt,
+                "aspect_ratio": aspect_ratio,
+                "output_format": "png",
+                "disable_safety_checker": True
+            }
         )
-        image_url = img_res.data[0].url
+        
+        # Flux returns a list of URLs/streams
+        image_url = output[0]
         
         # Download
         local_path = os.path.join(tmp_dir, "ai_thumb_bg.png")
-        with requests.get(image_url) as r:
+        with requests.get(str(image_url)) as r:
             with open(local_path, "wb") as f:
                 f.write(r.content)
         return local_path
+
     except Exception as e:
-        logging.error(f"DALL-E Failed: {e}")
+        logging.error(f"⚠️ Flux Generation Failed: {e}")
         return None
 
 def generate_hook_text(transcript, title):
@@ -153,21 +172,22 @@ def generate_hook_text(transcript, title):
         res = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "Generate a 3-5 word shocking visual hook text for a thumbnail. Output ONLY text."},
+                {"role": "system", "content": "You are a Viral Content Creator. Create a 3-word shocking visual hook text for a thumbnail. Return ONLY the text."},
                 {"role": "user", "content": f"Title: {title}\nTranscript: {transcript[:500]}"}
             ]
         )
-        return res.choices[0].message.content.strip().upper().replace('"', '')
+        text = res.choices[0].message.content.strip().upper().replace('"', '')
+        return text if len(text) < 25 else "MUST WATCH"
     except:
-        return "WATCH THIS"
+        return "VIRAL VIDEO"
 
 # -------------------------------------------------
-# SRT FORMATTER (HORMOZI SPLIT)
+# SRT FORMATTER (STACKED LAYOUT)
 # -------------------------------------------------
-def create_hormozi_srt(segments, output_path):
+def create_stacked_srt(segments, output_path):
     """
-    Splits long segments into shorter chunks (max 4 words) to ensure
-    subtitles stay at the bottom and don't take up too much width.
+    Formats subtitles to appear in chunks.
+    If chunk > 3 words, it tries to split into two lines using \n
     """
     srt_content = ""
     index = 1
@@ -180,19 +200,27 @@ def create_hormozi_srt(segments, output_path):
         
         if not words: continue
 
-        # Determine how many chunks
-        chunk_size = 4 # Max words per line
+        # Group into small chunks of max 5 words
+        chunk_size = 5
         chunks = [words[i:i + chunk_size] for i in range(0, len(words), chunk_size)]
         chunk_duration = duration / len(chunks)
         
         current_start = start
         for chunk in chunks:
             current_end = current_start + chunk_duration
-            text_line = " ".join(chunk)
+            
+            # Smart Line Splitting for Hormozi Stacked look
+            if len(chunk) > 2:
+                mid = math.ceil(len(chunk) / 2)
+                line1 = " ".join(chunk[:mid])
+                line2 = " ".join(chunk[mid:])
+                text_block = f"{line1}\n{line2}"
+            else:
+                text_block = " ".join(chunk)
             
             srt_content += f"{index}\n"
             srt_content += f"{format_ts(current_start)} --> {format_ts(current_end)}\n"
-            srt_content += f"{text_line}\n\n"
+            srt_content += f"{text_block}\n\n"
             
             current_start = current_end
             index += 1
@@ -207,27 +235,28 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     is_vertical = height > width
 
     if is_vertical:
-        # Shorts
         play_res = "PlayResX=1080,PlayResY=1920"
-        sub_font_size = 85  # Readable size
-        sub_margin_v = 150  # Lowered (was 350, too high). 150 is bottom-safe area.
-        brand_size = 30     # Fixed as requested
+        # SIZE: Big enough to be read (80 for 1080p width is good)
+        sub_font_size = 80
+        # MARGIN: 140 is bottom-safe
+        sub_margin_v = 140  
+        
+        brand_size = 30
         brand_x = "w-text_w-30"
         brand_y = "50"
     else:
-        # Landscape
         play_res = "PlayResX=1920,PlayResY=1080"
-        sub_font_size = 60
+        sub_font_size = 55
         sub_margin_v = 80
         brand_size = 30
         brand_x = "w-text_w-30"
         brand_y = "30"
 
-    # STYLE: Opaque Box (3) for readability
+    # SUBTITLE STYLE: Opaque Box (3)
     sub_style = (
         f"FontName=Arial,FontSize={sub_font_size},PrimaryColour=&H00FFFFFF,"
-        f"OutlineColour=&H00000000,BackColour=&H60000000,BorderStyle=3,"
-        f"Outline=1,Shadow=0,Alignment=2,MarginV={sub_margin_v},"
+        f"OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=3,"
+        f"Outline=0,Shadow=0,Alignment=2,MarginV={sub_margin_v},"
         f"WrapStyle=2,{play_res}"
     )
 
@@ -236,7 +265,7 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     safe_brand = sanitize(channel_name)
     font_dir = os.path.dirname(safe_font)
 
-    # BRANDING: Top Right
+    # BRANDING
     brand_filter = (
         f"drawtext=fontfile='{safe_font}':text='{safe_brand}':"
         f"fontcolor=#FFD700:fontsize={brand_size}:"
@@ -261,7 +290,7 @@ def create_final_thumbnail(bg_image_path, font_path, output_path, text, width):
     try:
         safe_font = sanitize(font_path)
         safe_text = sanitize(text)
-        font_size = int(width / 6) # Big Text
+        font_size = int(width / 6)
         
         vf = (
             f"drawtext=fontfile='{safe_font}':text='{safe_text}':"
@@ -270,12 +299,10 @@ def create_final_thumbnail(bg_image_path, font_path, output_path, text, width):
             f"box=1:boxcolor=black@0.6:boxborderw=30"
         )
         
-        # Scale AI image to video width/height first if needed, but here we assume close match or crop
-        # We'll just run filter on the image
         cmd = [
             "ffmpeg", "-y", "-i", bg_image_path,
             "-vf", vf,
-            "-frames:v", "1", "-update", "1", # Fix for single image output
+            "-frames:v", "1", "-update", "1", 
             output_path
         ]
         subprocess.run(cmd, check=True)
@@ -285,7 +312,7 @@ def create_final_thumbnail(bg_image_path, font_path, output_path, text, width):
         return False
 
 # -------------------------------------------------
-# TASK
+# CELERY TASK
 # -------------------------------------------------
 @celery.task(bind=True)
 def process_video_upload(self, form_data):
@@ -320,21 +347,23 @@ def process_video_upload(self, form_data):
         seo = generate_metadata(full_text)
         hook_text = generate_hook_text(full_text, seo.get("title", ""))
         
-        # Generate SRT with splitting for "Hormozi" look
-        create_hormozi_srt(transcript_obj.segments, srt)
+        # Create Stacked SRT
+        create_stacked_srt(transcript_obj.segments, srt)
 
         update("Rendering Video")
         render_video(raw, srt, font, final, channel, w, h)
 
         update("Creating AI Thumbnail")
-        # 1. Generate AI Background
-        ai_bg = generate_thumbnail_image(full_text, seo.get("title",""), tmp)
+        # Generate using Flux (Cheaper & Better)
+        ai_bg = generate_thumbnail_image(full_text, seo.get("title",""), tmp, w, h)
         has_thumb = False
+        
         if ai_bg:
-            # 2. Overlay Text
+            # AI Background Successful - Overlay Text
             has_thumb = create_final_thumbnail(ai_bg, font, thumb_path, hook_text, w)
         else:
-            # Fallback to screenshot if AI fails
+            # Fallback: Capture frame if Replicate fails
+            logging.info("Fallback: Using Video Frame for Thumbnail")
             try:
                 subprocess.run([
                     "ffmpeg", "-y", "-ss", str(dur/2), "-i", final,
@@ -357,7 +386,7 @@ def process_video_upload(self, form_data):
             "video_url": vid_res["secure_url"],
             "thumbnail_url": thumb_url,
             "metadata": seo,
-            "transcript_text": full_text
+            "transcript_srt": full_text # Passing full text so frontend sees it
         }
 
     except Exception as e:
@@ -366,4 +395,3 @@ def process_video_upload(self, form_data):
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-``` Your video is ready!
