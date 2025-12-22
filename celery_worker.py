@@ -8,6 +8,7 @@ import subprocess
 import traceback
 import requests
 import re
+import math
 from datetime import timedelta
 
 import cloudinary
@@ -16,7 +17,7 @@ from openai import OpenAI
 from celery_init import celery
 
 # -------------------------------------------------
-# CONFIGURATION
+# CONFIG
 # -------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -34,19 +35,19 @@ cloudinary.config(
 )
 
 # -------------------------------------------------
-# HELPERS
+# UTILS
 # -------------------------------------------------
-def load_prompt_from_file(filepath, default_text):
+def load_prompt(filepath, default):
     try:
-        full_path = os.path.join(os.getcwd(), filepath)
-        if os.path.exists(full_path):
-            with open(full_path, "r", encoding="utf-8") as f:
+        path = os.path.join(os.getcwd(), filepath)
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
                 return f.read()
-    except Exception:
+    except:
         pass
-    return default_text
+    return default
 
-def sanitize_text_for_ffmpeg(text):
+def sanitize(text):
     if not text: return ""
     return text.replace("'", "").replace('"', '').replace(":", "\\:").replace(",", "\\,")
 
@@ -92,41 +93,112 @@ def ensure_font(tmp_dir):
     return font_path
 
 # -------------------------------------------------
-# AI GENERATORS
+# AI ENGINE
 # -------------------------------------------------
-def generate_expert_metadata(transcript_text):
-    default_prompt = "Generate JSON with 'title', 'description', 'tags'."
-    system_instruction = load_prompt_from_file("prompts/prompt_youtube_metadata_generator.txt", default_prompt)
+def generate_metadata(transcript):
+    sys_prompt = load_prompt("prompts/prompt_youtube_metadata_generator.txt", "Generate viral JSON title/desc/tags.")
     try:
-        response = openai_client.chat.completions.create(
+        res = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": f"Transcript: {transcript_text[:4000]}"}
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": f"Transcript: {transcript[:4000]}"}
             ],
             response_format={ "type": "json_object" }
         )
-        return json.loads(response.choices[0].message.content)
+        return json.loads(res.choices[0].message.content)
     except:
         return {"title": "Viral Video", "description": "", "tags": ""}
 
-def generate_thumbnail_hook(transcript_text, title):
-    system_prompt = (
-        "You are a Viral Content Expert. "
-        "Create a 3 to 5 word 'Visual Hook' text for a YouTube Thumbnail. "
-        "Return ONLY the text. No quotes."
-    )
+def generate_thumbnail_image(transcript, title, tmp_dir):
+    """Generates an AI Image using DALL-E 3 instead of a screenshot."""
+    img_prompt_sys = load_prompt("prompts/prompt_image_synthesizer.txt", "Describe a high quality youtube thumbnail background image without text.")
+    
+    # 1. Get Visual Description
     try:
-        response = openai_client.chat.completions.create(
+        desc_res = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Title: {title}\nTranscript: {transcript_text[:1000]}"}
+                {"role": "system", "content": img_prompt_sys},
+                {"role": "user", "content": f"Title: {title}\nTranscript: {transcript[:1000]}"}
             ]
         )
-        return response.choices[0].message.content.strip().upper()
+        visual_prompt = desc_res.choices[0].message.content.strip()[:1000] # Limit char count
     except:
-        return title.upper()[:20]
+        visual_prompt = f"High quality cinematic photo for video: {title}"
+
+    # 2. Generate Image
+    try:
+        img_res = openai_client.images.generate(
+            model="dall-e-3",
+            prompt=visual_prompt,
+            size="1024x1792", # Vertical aspect ratio approx
+            quality="standard",
+            n=1
+        )
+        image_url = img_res.data[0].url
+        
+        # Download
+        local_path = os.path.join(tmp_dir, "ai_thumb_bg.png")
+        with requests.get(image_url) as r:
+            with open(local_path, "wb") as f:
+                f.write(r.content)
+        return local_path
+    except Exception as e:
+        logging.error(f"DALL-E Failed: {e}")
+        return None
+
+def generate_hook_text(transcript, title):
+    try:
+        res = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Generate a 3-5 word shocking visual hook text for a thumbnail. Output ONLY text."},
+                {"role": "user", "content": f"Title: {title}\nTranscript: {transcript[:500]}"}
+            ]
+        )
+        return res.choices[0].message.content.strip().upper().replace('"', '')
+    except:
+        return "WATCH THIS"
+
+# -------------------------------------------------
+# SRT FORMATTER (HORMOZI SPLIT)
+# -------------------------------------------------
+def create_hormozi_srt(segments, output_path):
+    """
+    Splits long segments into shorter chunks (max 4 words) to ensure
+    subtitles stay at the bottom and don't take up too much width.
+    """
+    srt_content = ""
+    index = 1
+    
+    for seg in segments:
+        words = seg.text.strip().split()
+        start = seg.start
+        end = seg.end
+        duration = end - start
+        
+        if not words: continue
+
+        # Determine how many chunks
+        chunk_size = 4 # Max words per line
+        chunks = [words[i:i + chunk_size] for i in range(0, len(words), chunk_size)]
+        chunk_duration = duration / len(chunks)
+        
+        current_start = start
+        for chunk in chunks:
+            current_end = current_start + chunk_duration
+            text_line = " ".join(chunk)
+            
+            srt_content += f"{index}\n"
+            srt_content += f"{format_ts(current_start)} --> {format_ts(current_end)}\n"
+            srt_content += f"{text_line}\n\n"
+            
+            current_start = current_end
+            index += 1
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(srt_content)
 
 # -------------------------------------------------
 # RENDER ENGINE
@@ -135,108 +207,85 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     is_vertical = height > width
 
     if is_vertical:
+        # Shorts
         play_res = "PlayResX=1080,PlayResY=1920"
-        # MASSIVE INCREASE for visibility on mobile
-        sub_font_size = 80 
-        sub_margin_v = 350 # Higher up
-        
-        # Fixed Branding
-        brand_size = 30
-        brand_x = "w-text_w-20"
+        sub_font_size = 85  # Readable size
+        sub_margin_v = 150  # Lowered (was 350, too high). 150 is bottom-safe area.
+        brand_size = 30     # Fixed as requested
+        brand_x = "w-text_w-30"
         brand_y = "50"
     else:
+        # Landscape
         play_res = "PlayResX=1920,PlayResY=1080"
         sub_font_size = 60
-        sub_margin_v = 100
-        
+        sub_margin_v = 80
         brand_size = 30
         brand_x = "w-text_w-30"
         brand_y = "30"
 
-    # 
+    # STYLE: Opaque Box (3) for readability
     sub_style = (
-        f"FontName=Arial,"
-        f"FontSize={sub_font_size},"
-        f"PrimaryColour=&H00FFFFFF,"   # White
-        f"OutlineColour=&H00000000,"   # Black Outline
-        f"BackColour=&H60000000,"      # Black Box (60% Alpha)
-        f"BorderStyle=3,"              # Opaque Box Mode
-        f"Outline=1,"
-        f"Shadow=0,"
-        f"Alignment=2,"
-        f"MarginV={sub_margin_v},"
-        f"WrapStyle=2,"
-        f"{play_res}"
+        f"FontName=Arial,FontSize={sub_font_size},PrimaryColour=&H00FFFFFF,"
+        f"OutlineColour=&H00000000,BackColour=&H60000000,BorderStyle=3,"
+        f"Outline=1,Shadow=0,Alignment=2,MarginV={sub_margin_v},"
+        f"WrapStyle=2,{play_res}"
     )
 
-    safe_srt = sanitize_text_for_ffmpeg(srt_file)
-    safe_font = sanitize_text_for_ffmpeg(font_path)
+    safe_srt = sanitize(srt_file)
+    safe_font = sanitize(font_path)
+    safe_brand = sanitize(channel_name)
     font_dir = os.path.dirname(safe_font)
-    safe_brand = sanitize_text_for_ffmpeg(channel_name)
 
-    branding_filter = (
-        f"drawtext=fontfile='{safe_font}':"
-        f"text='{safe_brand}':"
-        f"fontcolor=#FFD700:" 
-        f"fontsize={brand_size}:"
+    # BRANDING: Top Right
+    brand_filter = (
+        f"drawtext=fontfile='{safe_font}':text='{safe_brand}':"
+        f"fontcolor=#FFD700:fontsize={brand_size}:"
         f"x={brand_x}:y={brand_y}:"
+        f"shadowcolor=black@0.8:shadowx=2:shadowy=2:"
         f"alpha='0.8+0.2*sin(2*PI*t/2)'"
     )
 
-    subtitle_filter = (
-        f"subtitles='{safe_srt}':"
-        f"fontsdir='{font_dir}':"
-        f"force_style='{sub_style}'"
-    )
+    # SUBTITLES
+    sub_filter = f"subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{sub_style}'"
 
     cmd = [
-        "ffmpeg", "-y",
-        "-i", input_video,
-        "-vf", f"{branding_filter},{subtitle_filter}",
-        "-c:v", "libx264",
-        "-preset", "superfast",
-        "-crf", "23",
-        "-c:a", "aac",
+        "ffmpeg", "-y", "-i", input_video,
+        "-vf", f"{brand_filter},{sub_filter}",
+        "-c:v", "libx264", "-preset", "superfast", "-crf", "23", "-c:a", "aac",
         output_video
     ]
     subprocess.run(cmd, check=True)
 
-def generate_thumbnail(video_path, font_path, output_path, text_overlay, duration, width):
+def create_final_thumbnail(bg_image_path, font_path, output_path, text, width):
+    """Overlays text on the generated AI image."""
     try:
-        timestamp = duration / 2
-        safe_font = sanitize_text_for_ffmpeg(font_path)
-        safe_text = sanitize_text_for_ffmpeg(text_overlay)
+        safe_font = sanitize(font_path)
+        safe_text = sanitize(text)
+        font_size = int(width / 6) # Big Text
         
-        # Make font massive (1/6th of width)
-        font_size = int(width / 6)
-        
-        # Box with wider padding (boxborderw=40) for "Design" look
         vf = (
-            f"drawtext=fontfile='{safe_font}':"
-            f"text='{safe_text}':"
-            f"fontcolor=white:"
-            f"fontsize={font_size}:"
+            f"drawtext=fontfile='{safe_font}':text='{safe_text}':"
+            f"fontcolor=white:fontsize={font_size}:"
             f"x=(w-text_w)/2:y=(h-text_h)/2:"
-            f"box=1:boxcolor=black@0.7:boxborderw=40"
+            f"box=1:boxcolor=black@0.6:boxborderw=30"
         )
-
+        
+        # Scale AI image to video width/height first if needed, but here we assume close match or crop
+        # We'll just run filter on the image
         cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(timestamp),
-            "-i", video_path,
+            "ffmpeg", "-y", "-i", bg_image_path,
             "-vf", vf,
-            "-frames:v", "1",
-            "-update", "1",
-            "-q:v", "2",
+            "-frames:v", "1", "-update", "1", # Fix for single image output
             output_path
         ]
         subprocess.run(cmd, check=True)
         return True
-    except:
+    except Exception as e:
+        logging.error(f"Thumb overlay error: {e}")
         return False
 
 # -------------------------------------------------
-# CELERY TASK
+# TASK
 # -------------------------------------------------
 @celery.task(bind=True)
 def process_video_upload(self, form_data):
@@ -248,54 +297,67 @@ def process_video_upload(self, form_data):
     audio = os.path.join(tmp, "audio.mp3")
     srt = os.path.join(tmp, "subs.srt")
     final = os.path.join(tmp, "final.mp4")
-    thumb = os.path.join(tmp, "thumbnail.jpg")
+    thumb_path = os.path.join(tmp, "thumbnail.jpg")
 
     try:
         def update(msg): self.update_state(state="PROGRESS", meta={"message": msg})
 
         update("Downloading")
         download_file(form_data["video_url"], raw)
-        duration, w, h = get_video_info(raw)
+        dur, w, h = get_video_info(raw)
         font = ensure_font(tmp)
         channel = form_data.get("channel_name", "@ViralShorts")
 
-        update("AI Analysis")
+        update("Processing Audio")
         subprocess.run(["ffmpeg", "-y", "-i", raw, "-map", "a", "-q:a", "0", audio], check=True)
         
-        transcript = openai_client.audio.translations.create(
+        transcript_obj = openai_client.audio.translations.create(
             model="whisper-1", file=open(audio, "rb"), response_format="verbose_json"
         )
-        full_text = transcript.text
+        full_text = transcript_obj.text
 
-        seo_data = generate_expert_metadata(full_text)
-        thumb_text = generate_thumbnail_hook(full_text, seo_data.get("title", ""))
+        update("Generating Assets")
+        seo = generate_metadata(full_text)
+        hook_text = generate_hook_text(full_text, seo.get("title", ""))
+        
+        # Generate SRT with splitting for "Hormozi" look
+        create_hormozi_srt(transcript_obj.segments, srt)
 
-        srt_content = ""
-        for i, seg in enumerate(transcript.segments):
-            srt_content += f"{i+1}\n{format_ts(seg.start)} --> {format_ts(seg.end)}\n{seg.text.strip()}\n\n"
-        with open(srt, "w", encoding="utf-8") as f: f.write(srt_content)
-
-        update("Rendering")
+        update("Rendering Video")
         render_video(raw, srt, font, final, channel, w, h)
 
-        update("Thumbnail")
-        has_thumb = generate_thumbnail(final, font, thumb, thumb_text, duration, w)
+        update("Creating AI Thumbnail")
+        # 1. Generate AI Background
+        ai_bg = generate_thumbnail_image(full_text, seo.get("title",""), tmp)
+        has_thumb = False
+        if ai_bg:
+            # 2. Overlay Text
+            has_thumb = create_final_thumbnail(ai_bg, font, thumb_path, hook_text, w)
+        else:
+            # Fallback to screenshot if AI fails
+            try:
+                subprocess.run([
+                    "ffmpeg", "-y", "-ss", str(dur/2), "-i", final,
+                    "-vf", f"drawtext=fontfile='{sanitize(font)}':text='{sanitize(hook_text)}':fontcolor=white:fontsize={int(w/7)}:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.6:boxborderw=20",
+                    "-frames:v", "1", "-update", "1", thumb_path
+                ], check=True)
+                has_thumb = True
+            except: pass
 
         update("Uploading")
         vid_res = cloudinary.uploader.upload(final, resource_type="video", folder="viral_edits")
         
         thumb_url = None
         if has_thumb:
-            thumb_res = cloudinary.uploader.upload(thumb, resource_type="image", folder="viral_thumbnails")
+            thumb_res = cloudinary.uploader.upload(thumb_path, resource_type="image", folder="viral_thumbnails")
             thumb_url = thumb_res["secure_url"]
 
-        # EXPLICIT RETURN OF TRANSCRIPT TEXT
         return {
             "status": "success",
             "video_url": vid_res["secure_url"],
             "thumbnail_url": thumb_url,
-            "metadata": seo_data,
-            "transcript_text": full_text 
+            "metadata": seo,
+            "transcript_text": full_text
         }
 
     except Exception as e:
@@ -304,3 +366,4 @@ def process_video_upload(self, form_data):
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+``` Your video is ready!
