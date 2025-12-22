@@ -192,6 +192,10 @@ def generate_endpoint():
 
         # [NEW] Check for Auto-Upload Toggle & Credentials
         auto_upload = request.form.get('auto_upload_youtube', 'false')
+        
+        # [NEW] Capture YouTube Category from Frontend
+        youtube_category = request.form.get('youtube_category', '22') # Default to 22 (People & Blogs)
+
         youtube_creds = None
         
         if auto_upload == 'true':
@@ -207,7 +211,8 @@ def generate_endpoint():
             "blur_watermarks": blur_watermarks,
             "add_subtitles": add_subtitles,
             "channel_name": channel_name,
-            "youtube_creds": youtube_creds # <--- [NEW] Passed to Worker
+            "youtube_category": youtube_category, # <--- [NEW] Passed to Worker
+            "youtube_creds": youtube_creds 
         }
 
         logger.info(f"🚀 Dispatching Task. Auto-Upload: {auto_upload}")
