@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import uuid
 import shutil
@@ -7,176 +8,231 @@ import subprocess
 import traceback
 import requests
 import re
-from pathlib import Path
 from datetime import timedelta
-from string import Template
 
 import cloudinary
 import cloudinary.uploader
-import replicate
 from openai import OpenAI
+from celery_init import celery
 
-# ------------------------------------------------------------------
-# CONFIG & AI AGENTS
-# ------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [SAAS-ENGINE]: %(message)s")
+# -------------------------------------------------
+# CONFIG
+# -------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] (SAAS-ENGINE): %(message)s"
+)
 
-# Load these from your environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-SEO_PROMPT_TEMPLATE = """
-{
-  "title": "Viral Clicky Title",
-  "description": "SEO Description with hashtags",
-  "tags": ["tag1", "tag2"],
-  "thumbnail_prompt": "Cinematic, high-detail, 8k, realistic scene of: ${climax}",
-  "primary_keyword": "topic"
-}
-Analyze this transcript: ${transcript}
-Return ONLY valid JSON.
-"""
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+    secure=True
+)
 
-# ------------------------------------------------------------------
-# DYNAMIC RENDERING ENGINE (The Core Fix)
-# ------------------------------------------------------------------
-def render_video_final(input_video, srt_file, font_path, output_video, channel_name, width, height):
-    """
-    Calculates subtitle size and position based on aspect ratio.
-    Removes background blurness by focusing on direct overlay.
-    """
+# -------------------------------------------------
+# HELPERS
+# -------------------------------------------------
+def transform_drive_url(url):
+    patterns = [r"/file/d/([a-zA-Z0-9_-]+)", r"id=([a-zA-Z0-9_-]+)"]
+    for p in patterns:
+        m = re.search(p, url)
+        if m:
+            return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
+    return url
+
+
+def download_file(url, path):
+    url = transform_drive_url(url)
+    with requests.get(url, stream=True, timeout=300) as r:
+        r.raise_for_status()
+        with open(path, "wb") as f:
+            for chunk in r.iter_content(8192):
+                f.write(chunk)
+    return path
+
+
+def get_video_info(path):
+    try:
+        out = subprocess.check_output([
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,duration",
+            "-of", "json", path
+        ])
+        s = json.loads(out)["streams"][0]
+        return float(s.get("duration", 0)), int(s["width"]), int(s["height"])
+    except Exception:
+        return 0.0, 1920, 1080
+
+
+def format_ts(sec):
+    td = timedelta(seconds=sec)
+    s = int(td.total_seconds())
+    ms = int(td.microseconds / 1000)
+    return f"{s//3600:02}:{(s%3600)//60:02}:{s%60:02},{ms:03}"
+
+
+def ensure_font(tmp_dir):
+    fonts_dir = os.path.join(tmp_dir, "fonts")
+    os.makedirs(fonts_dir, exist_ok=True)
+
+    font_path = os.path.join(fonts_dir, "Arial.ttf")
+    if not os.path.exists(font_path):
+        r = requests.get(
+            "https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial.ttf",
+            timeout=10
+        )
+        with open(font_path, "wb") as f:
+            f.write(r.content)
+    return font_path
+
+# -------------------------------------------------
+# FINAL RENDER ENGINE (ABSOLUTE BOTTOM SAFE)
+# -------------------------------------------------
+def render_video(
+    input_video,
+    srt_file,
+    font_path,
+    output_video,
+    channel_name,
+    width,
+    height
+):
     is_vertical = height > width
-    
-    # Logic: Base scaling on height to keep text readable
-    # 9:16 (Vertical) usually 1920px high | 16:9 (Full) usually 1080px high
+
     if is_vertical:
-        # SHORT/REEL SETTINGS
-        play_res_y = 1920
-        play_res_x = 1080
-        font_size = 12   # Reduced size for cleaner look
-        sub_margin = 120 # Higher up to clear UI buttons
-        title_y = "h-80" # Brand title at absolute bottom
+        play_res = "PlayResX=1080,PlayResY=1920"
+        font_size = 15
+        sub_margin_v = 40
+        brand_margin_v = 85
     else:
-        # CINEMATIC/FULL SETTINGS
-        play_res_y = 1080
-        play_res_x = 1920
-        font_size = 18   # Scaled for horizontal
-        sub_margin = 70 
-        title_y = "h-50"
+        play_res = "PlayResX=1920,PlayResY=1080"
+        font_size = 20
+        sub_margin_v = 20
+        brand_margin_v = 50
 
     sub_style = (
-        f"FontName=Arial,FontSize={font_size},PrimaryColour=&H00FFFFFF,"
-        f"OutlineColour=&H00000000,BorderStyle=1,Outline=0.5,Shadow=0,"
-        f"Alignment=2,MarginV={sub_margin},WrapStyle=2,"
-        f"PlayResX={play_res_x},PlayResY={play_res_y}"
+        f"FontName=Arial,"
+        f"FontSize={font_size},"
+        f"PrimaryColour=&H00FFFFFF,"
+        f"OutlineColour=&H00000000,"
+        f"BorderStyle=1,"
+        f"Outline=1,"
+        f"Shadow=0,"
+        f"Alignment=2,"
+        f"MarginV={sub_margin_v},"
+        f"WrapStyle=2,"
+        f"{play_res}"
     )
 
     safe_srt = srt_file.replace("\\", "/").replace(":", "\\:")
     safe_font = font_path.replace("\\", "/").replace(":", "\\:")
-    font_dir = os.path.dirname(safe_font)
-    brand = channel_name.upper()
+    font_dir = safe_font.rsplit("/", 1)[0]
+    brand = channel_name.replace(":", "").replace("'", "")
 
-    # FILTER CHAIN:
-    # 1. Draw Title at very bottom
-    # 2. Draw Subtitles above it
     filters = [
-        f"drawtext=fontfile='{safe_font}':text='{brand}':fontcolor='#FFD700':"
-        f"fontsize={font_size + 4}:x=(w-text_w)/2:y={title_y}:"
-        f"shadowcolor='black@0.6':shadowx=2:shadowy=2",
-        
-        f"subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{sub_style}'"
+        f"drawtext=fontfile='{safe_font}':"
+        f"text='{brand}':"
+        f"fontcolor=#FFD700:"
+        f"fontsize={font_size + 4}:"
+        f"x=(w-text_w)/2:"
+        f"y=h-({brand_margin_v}+text_h):"
+        f"shadowcolor=black@0.4:"
+        f"shadowx=2:"
+        f"shadowy=2",
+
+        f"subtitles='{safe_srt}':"
+        f"fontsdir='{font_dir}':"
+        f"force_style='{sub_style}'"
     ]
 
     cmd = [
-        "ffmpeg", "-y", "-i", input_video,
+        "ffmpeg", "-y",
+        "-i", input_video,
         "-vf", ",".join(filters),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "21", "-c:a", "copy",
+        "-map", "0:v",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "20",
+        "-c:a", "copy",
         output_video
     ]
+
     subprocess.run(cmd, check=True)
 
-# ------------------------------------------------------------------
-# UTILS
-# ------------------------------------------------------------------
-def get_video_info(path):
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", 
-           "-show_entries", "stream=width,height,duration", "-of", "json", path]
-    out = subprocess.check_output(cmd)
-    s = json.loads(out)["streams"][0]
-    return float(s["duration"]), int(s["width"]), int(s["height"])
-
-def format_ts(sec):
-    td = timedelta(seconds=sec)
-    total_sec = int(td.total_seconds())
-    ms = int(td.microseconds / 1000)
-    return f"{total_sec//3600:02}:{(total_sec%3600)//60:02}:{total_sec%60:02},{ms:03}"
-
-def ensure_font(tmp):
-    font_path = os.path.join(tmp, "Arial.ttf")
-    if not os.path.exists(font_path):
-        r = requests.get("https://github.com/matomo-org/travis-scripts/raw/master/fonts/Arial.ttf")
-        with open(font_path, "wb") as f: f.write(r.content)
-    return font_path
-
-# ------------------------------------------------------------------
-# MAIN PROCESSOR
-# ------------------------------------------------------------------
-def process_video_locally(video_url, channel_name="@MyChannel"):
+# -------------------------------------------------
+# CELERY TASK
+# -------------------------------------------------
+@celery.task(bind=True)
+def process_video_upload(self, form_data):
     task_id = str(uuid.uuid4())
-    tmp = f"./job_{task_id}"
+    tmp = f"/tmp/job_{task_id}"
     os.makedirs(tmp, exist_ok=True)
 
-    raw_path = os.path.join(tmp, "raw.mp4")
-    audio_path = os.path.join(tmp, "audio.mp3")
-    srt_path = os.path.join(tmp, "subs.srt")
-    final_path = os.path.join(tmp, "final_output.mp4")
+    raw = os.path.join(tmp, "raw.mp4")
+    audio = os.path.join(tmp, "audio.mp3")
+    srt = os.path.join(tmp, "subs.srt")
+    final = os.path.join(tmp, "final.mp4")
 
     try:
-        # 1. Download
-        print("--- Downloading ---")
-        with requests.get(video_url, stream=True) as r:
-            with open(raw_path, "wb") as f: shutil.copyfileobj(r.raw, f)
+        def update(msg):
+            self.update_state(state="PROGRESS", meta={"message": msg})
 
-        duration, w, h = get_video_info(raw_path)
+        update("Downloading video")
+        download_file(form_data["video_url"], raw)
+
+        duration, w, h = get_video_info(raw)
         font = ensure_font(tmp)
+        channel = form_data.get("channel_name", "@ViralShorts")
 
-        # 2. Transcribe
-        print("--- AI Transcribing ---")
-        subprocess.run(["ffmpeg", "-y", "-i", raw_path, "-q:a", "0", "-map", "a", audio_path], check=True)
-        with open(audio_path, "rb") as audio_file:
-            transcript = openai_client.audio.translations.create(model="whisper-1", file=audio_file, response_format="verbose_json")
+        update("Extracting audio")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", raw, "-map", "a", "-q:a", "0", audio],
+            check=True
+        )
 
-        # 3. Create SRT
-        full_text = ""
-        with open(srt_path, "w", encoding="utf-8") as f:
-            for i, seg in enumerate(transcript.segments):
-                f.write(f"{i+1}\n{format_ts(seg.start)} --> {format_ts(seg.end)}\n{seg.text.strip()}\n\n")
-                full_text += seg.text + " "
+        update("Transcribing")
+        transcript = openai_client.audio.translations.create(
+            model="whisper-1",
+            file=open(audio, "rb"),
+            response_format="verbose_json"
+        )
 
-        # 4. SEO & Thumbnail
-        print("--- Generating SEO & Thumbnail ---")
-        seo_prompt = Template(SEO_PROMPT_TEMPLATE).safe_substitute(transcript=full_text[:2000], climax=full_text[:100])
-        res = openai_client.chat.completions.create(model="gpt-4o", messages=[{"role":"user", "content": seo_prompt}], response_format={"type": "json_object"})
-        meta = json.loads(res.choices[0].message.content)
-        
-        flux_out = replicate.run("black-forest-labs/flux-schnell", input={"prompt": meta['thumbnail_prompt'], "aspect_ratio": "9:16" if h>w else "16:9"})
-        
-        # 5. Render
-        print("--- Final Rendering ---")
-        render_video_final(raw_path, srt_path, font, final_path, channel_name, w, h)
+        srt_text = ""
+        for i, seg in enumerate(transcript.segments):
+            srt_text += (
+                f"{i+1}\n"
+                f"{format_ts(seg.start)} --> {format_ts(seg.end)}\n"
+                f"{seg.text.strip()}\n\n"
+            )
 
-        print(f"DONE! File saved at: {final_path}")
-        print(f"Thumbnail: {flux_out[0]}")
-        print(f"SEO Metadata: {meta}")
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write(srt_text)
+
+        update("Rendering final video")
+        render_video(raw, srt, font, final, channel, w, h)
+
+        update("Uploading")
+        cloud = cloudinary.uploader.upload(
+            final,
+            resource_type="video",
+            folder="viral_edits"
+        )
+
+        return {
+            "status": "success",
+            "video_url": cloud["secure_url"],
+            "transcript_srt": srt_text
+        }
 
     except Exception as e:
-        print(f"ERROR: {e}")
-        traceback.print_exc()
-    finally:
-        # shutil.rmtree(tmp) # Uncomment to clean up after testing
-        pass
+        logging.error(traceback.format_exc())
+        return {"status": "error", "message": str(e)}
 
-if __name__ == "__main__":
-    # Test with a sample URL
-    TEST_VIDEO = "https://www.w3schools.com/html/mov_bbb.mp4" 
-    process_video_locally(TEST_VIDEO, "@ViralMaster")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
