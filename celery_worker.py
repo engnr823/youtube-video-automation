@@ -17,6 +17,11 @@ import replicate
 from openai import OpenAI
 from celery_init import celery
 
+# [NEW] Google API Imports for YouTube Upload
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
 # -------------------------------------------------
 # CONFIGURATION
 # -------------------------------------------------
@@ -229,12 +234,10 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
         brand_y = "30"
 
     # STYLE: Opaque Grey Box with Black Outline
-    # BackColour=&H00808080 (Alpha 00 = Opaque, 808080 = Grey)
-    # OutlineColour=&H00000000 (Alpha 00 = Opaque, 000000 = Black)
     sub_style = (
         f"FontName=Arial,FontSize={sub_font_size},PrimaryColour=&H00FFFFFF,"
         f"OutlineColour=&H00000000,"  # Black Outline
-        f"BackColour=&H00808080,"     # Opaque Grey Box
+        f"BackColour=&H00808080,"      # Opaque Grey Box
         f"BorderStyle=3,"             # Box Mode
         f"Outline=2,"                 # Thicker Outline
         f"Shadow=0,Alignment=2,MarginV={sub_margin_v},"
@@ -263,6 +266,55 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
         output_video
     ]
     subprocess.run(cmd, check=True)
+
+# -------------------------------------------------
+# [NEW] YOUTUBE UPLOAD FUNCTION
+# -------------------------------------------------
+def upload_video_to_youtube(creds_dict, video_path, metadata):
+    try:
+        logging.info("🚀 Initiating YouTube Upload...")
+        credentials = Credentials(**creds_dict)
+        youtube = build('youtube', 'v3', credentials=credentials)
+
+        title = metadata.get("title", "AI Generated Video")[:100] # YouTube limit
+        description = metadata.get("description", "Uploaded via AI Viral Editor")
+        tags = metadata.get("tags", [])
+        if isinstance(tags, str): tags = [tags]
+
+        body = {
+            'snippet': {
+                'title': title,
+                'description': description,
+                'tags': tags[:15],
+                'categoryId': '22' # People & Blogs
+            },
+            'status': {
+                'privacyStatus': 'private', # Start private for safety
+                'selfDeclaredMadeForKids': False
+            }
+        }
+
+        media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
+        
+        request = youtube.videos().insert(
+            part=','.join(body.keys()),
+            body=body,
+            media_body=media
+        )
+        
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                logging.info(f"Upload progress: {int(status.progress() * 100)}%")
+
+        video_id = response.get("id")
+        logging.info(f"✅ YouTube Upload Success! Video ID: {video_id}")
+        return f"https://youtu.be/{video_id}"
+
+    except Exception as e:
+        logging.error(f"❌ YouTube Upload Failed: {e}")
+        return None
 
 # -------------------------------------------------
 # CELERY TASK
@@ -334,7 +386,7 @@ def process_video_upload(self, form_data):
                 has_thumb = True
             except: pass
 
-        update("Uploading")
+        update("Uploading to Cloud")
         vid_res = cloudinary.uploader.upload(final, resource_type="video", folder="viral_edits")
         
         thumb_url = None
@@ -342,12 +394,23 @@ def process_video_upload(self, form_data):
             thumb_res = cloudinary.uploader.upload(thumb_path, resource_type="image", folder="viral_thumbnails")
             thumb_url = thumb_res["secure_url"]
 
+        # [NEW] Handle YouTube Upload
+        youtube_link = None
+        if form_data.get("youtube_creds"):
+            update("Uploading to YouTube")
+            youtube_link = upload_video_to_youtube(
+                form_data["youtube_creds"], 
+                final, 
+                seo
+            )
+
         return {
             "status": "success",
             "video_url": vid_res["secure_url"],
             "thumbnail_url": thumb_url,
+            "youtube_url": youtube_link, # [NEW] Return YouTube link
             "metadata": seo,
-            "transcript_srt": full_transcript_text # Now returns formatted timestamped text
+            "transcript_srt": full_transcript_text 
         }
 
     except Exception as e:
