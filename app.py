@@ -69,8 +69,13 @@ def authorize_youtube():
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE, scopes=SCOPES)
     
-    # The callback URI must match exactly what is in Google Cloud Console
-    flow.redirect_uri = url_for('oauth2callback', _external=True)
+    # --- [FIX FOR RAILWAY] Force HTTPS for Redirect URI ---
+    redirect_uri = url_for('oauth2callback', _external=True)
+    if redirect_uri.startswith('http://'):
+        redirect_uri = redirect_uri.replace('http://', 'https://', 1)
+    
+    flow.redirect_uri = redirect_uri
+    # ------------------------------------------------------
 
     # 'prompt' param forces the account chooser to appear every time
     authorization_url, state = flow.authorization_url(
@@ -89,10 +94,22 @@ def oauth2callback():
     
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE, scopes=SCOPES, state=state)
-    flow.redirect_uri = url_for('oauth2callback', _external=True)
+    
+    # --- [FIX FOR RAILWAY] Force HTTPS for Redirect URI ---
+    redirect_uri = url_for('oauth2callback', _external=True)
+    if redirect_uri.startswith('http://'):
+        redirect_uri = redirect_uri.replace('http://', 'https://', 1)
+    
+    flow.redirect_uri = redirect_uri
+    # ------------------------------------------------------
 
     # Fetch token
+    # We must also force the authorization response to be https 
+    # so Google accepts the validation
     authorization_response = request.url
+    if authorization_response.startswith('http://'):
+        authorization_response = authorization_response.replace('http://', 'https://', 1)
+
     flow.fetch_token(authorization_response=authorization_response)
 
     credentials = flow.credentials
