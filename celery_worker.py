@@ -17,7 +17,6 @@ import replicate
 from openai import OpenAI
 from celery_init import celery
 
-# [NEW] Google API Imports for YouTube Upload
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -56,7 +55,6 @@ def load_prompt(filepath, default):
     return default
 
 def sanitize(text):
-    """Escapes special characters for FFmpeg."""
     if not text: return ""
     return text.replace("'", "").replace('"', '').replace(":", "\\:").replace(",", "\\,")
 
@@ -192,7 +190,7 @@ def generate_formatted_transcript(segments):
     return formatted_text
 
 # -------------------------------------------------
-# RENDER ENGINE (BLUR + BRANDING)
+# RENDER ENGINE (7% BLUR)
 # -------------------------------------------------
 def render_video(input_video, srt_file, font_path, output_video, channel_name, width, height, should_blur):
     is_vertical = height > width
@@ -230,12 +228,17 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     filters = []
     current_stream = "[0:v]"
 
+    # [UPDATED] Blur Logic: Reduced to 7% (0.07)
     if should_blur:
         filters.append(f"{current_stream}split=3[main][top][bottom]")
-        filters.append("[top]crop=iw:ih*0.15:0:0,boxblur=20[blur_top]")
-        filters.append("[bottom]crop=iw:ih*0.15:0:ih*0.85,boxblur=20[blur_bottom]")
+        # Top 7%
+        filters.append("[top]crop=iw:ih*0.07:0:0,boxblur=20[blur_top]")
+        # Bottom 7% (Start at 93% down)
+        filters.append("[bottom]crop=iw:ih*0.07:0:ih*0.93,boxblur=20[blur_bottom]")
+        
+        # Overlay
         filters.append("[main][blur_top]overlay=0:0[v_half]")
-        filters.append("[v_half][blur_bottom]overlay=0:h-h*0.15[v_blurred]")
+        filters.append("[v_half][blur_bottom]overlay=0:h-h*0.07[v_blurred]")
         current_stream = "[v_blurred]"
 
     filters.append(f"{current_stream}drawtext=fontfile='{safe_font}':text='{safe_brand}':"
@@ -259,7 +262,7 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     subprocess.run(cmd, check=True)
 
 # -------------------------------------------------
-# [UPDATED] YOUTUBE UPLOAD (VIDEO + THUMBNAIL)
+# YOUTUBE UPLOAD (VIDEO + THUMBNAIL)
 # -------------------------------------------------
 def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=None, thumbnail_path=None):
     try:
@@ -289,7 +292,6 @@ def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=No
             }
         }
 
-        # 1. Upload Video
         media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
         request = youtube.videos().insert(part=','.join(body.keys()), body=body, media_body=media)
         
@@ -302,7 +304,6 @@ def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=No
         video_id = response.get("id")
         logging.info(f"✅ YouTube Upload Success! Video ID: {video_id}")
 
-        # 2. [NEW] Upload Thumbnail
         if thumbnail_path and os.path.exists(thumbnail_path):
             logging.info("📸 Uploading Thumbnail...")
             try:
@@ -393,7 +394,7 @@ def process_video_upload(self, form_data):
                 final, 
                 seo,
                 full_transcript_text,
-                thumb_path if has_thumb else None # <--- Passed here
+                thumb_path if has_thumb else None
             )
 
         return {
