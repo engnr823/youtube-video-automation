@@ -20,7 +20,6 @@ app = Flask(__name__)
 # --- CONFIGURATION ---
 
 # 1. Secret Key (Required for Sessions)
-# Reads from Railway Variable "SECRET_KEY" or defaults to a dev key
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key_change_in_prod")
 
 # 2. Allow HTTP for local dev (Railway uses HTTPS, so this is safe)
@@ -28,7 +27,13 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 # 3. Google Client Config
 CLIENT_SECRETS_FILE = "client_secret.json"
-SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
+
+# --- [CRITICAL FIX] ADD READONLY SCOPE ---
+# We need 'youtube.readonly' to fetch the Channel Name/Logo
+SCOPES = [
+    'https://www.googleapis.com/auth/youtube.upload',
+    'https://www.googleapis.com/auth/youtube.readonly' 
+]
 
 # 4. [CRITICAL FOR RAILWAY] Create client_secret.json from Env Var if missing
 if not os.path.exists(CLIENT_SECRETS_FILE):
@@ -104,8 +109,6 @@ def oauth2callback():
     # ------------------------------------------------------
 
     # Fetch token
-    # We must also force the authorization response to be https 
-    # so Google accepts the validation
     authorization_response = request.url
     if authorization_response.startswith('http://'):
         authorization_response = authorization_response.replace('http://', 'https://', 1)
@@ -118,6 +121,7 @@ def oauth2callback():
     try:
         youtube = build('youtube', 'v3', credentials=credentials)
         # Request 'mine=True' to get the channel tied to this token
+        # This requires 'youtube.readonly' scope
         request_channel = youtube.channels().list(part="snippet", mine=True)
         response_channel = request_channel.execute()
         
@@ -129,8 +133,11 @@ def oauth2callback():
                 'thumbnail': channel['snippet']['thumbnails']['default']['url'],
                 'id': channel['id']
             }
+            logger.info(f"✅ CONNECTED TO CHANNEL: {channel['snippet']['title']}")
     except Exception as e:
-        logger.error(f"Failed to fetch channel info: {e}")
+        logger.error(f"❌ Failed to fetch channel info: {e}")
+        # Even if we fail to get the name, we still save creds so upload might work
+        # But UI won't show green box. This helps debug.
 
     # Store credentials in Session
     session['credentials'] = {
