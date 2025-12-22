@@ -72,7 +72,6 @@
         @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 
         .video-container { position: relative; border-radius: 16px; overflow: hidden; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); background: #000; max-width: 400px; margin: 0 auto 2rem auto; }
-        /* Dynamic aspect ratio will be handled by JS or simple css max-height */
         video { width: 100%; display: block; }
 
         .metadata-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
@@ -169,6 +168,49 @@
                     <div class="form-check form-switch">
                         <input class="form-check-input" type="checkbox" name="add_subtitles" value="true" checked>
                     </div>
+                </div>
+            </fieldset>
+
+            <fieldset>
+                <legend><i class="bi bi-youtube"></i> YouTube Automation</legend>
+                
+                <div class="mb-3">
+                    {% if channel_info %}
+                        <div class="alert alert-success d-flex align-items-center gap-3">
+                            <img src="{{ channel_info.thumbnail }}" class="rounded-circle border border-2 border-white shadow-sm" width="50" height="50">
+                            
+                            <div class="flex-grow-1">
+                                <div class="small text-muted text-uppercase fw-bold">Connected To</div>
+                                <div class="fw-bold fs-5">{{ channel_info.title }}</div>
+                            </div>
+                            
+                            <a href="/authorize_youtube" class="btn btn-sm btn-outline-success">
+                                <i class="bi bi-arrow-repeat"></i> Switch
+                            </a>
+                        </div>
+
+                        <div class="toggle-switch">
+                            <div>
+                                <span class="toggle-label">Auto-Upload to Channel</span>
+                                <span class="toggle-desc">Final video will upload privately to <strong>{{ channel_info.title }}</strong>.</span>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" name="auto_upload_youtube" value="true">
+                            </div>
+                        </div>
+
+                    {% else %}
+                        <div class="text-center p-4 bg-light rounded border border-dashed">
+                            <i class="bi bi-youtube fs-1 text-danger mb-2"></i>
+                            <h6 class="fw-bold">Connect YouTube Channel</h6>
+                            <p class="text-muted small mb-3">
+                                Connect your channel to enable 1-click publishing directly from this tool.
+                            </p>
+                            <a href="/authorize_youtube" class="btn btn-danger text-white">
+                                <i class="bi bi-google"></i> Connect Channel
+                            </a>
+                        </div>
+                    {% endif %}
                 </div>
             </fieldset>
 
@@ -364,6 +406,14 @@
             // 4. Transcript
             if (data.transcript_srt) {
                 document.getElementById("transcriptBox").value = data.transcript_srt;
+            }
+
+            // 5. [NEW] YouTube Link
+            if (data.youtube_url) {
+                const ytDiv = document.createElement('div');
+                ytDiv.className = 'alert alert-success mt-3';
+                ytDiv.innerHTML = `<i class="bi bi-youtube"></i> <strong>Published to YouTube:</strong> <a href="${data.youtube_url}" target="_blank" class="alert-link">Watch Video</a>`;
+                document.getElementById('resultArea').querySelector('.col-md-5').appendChild(ytDiv);
             }
         }
 
