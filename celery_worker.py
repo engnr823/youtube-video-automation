@@ -16,7 +16,7 @@ from openai import OpenAI
 from celery_init import celery
 
 # -------------------------------------------------
-# CONFIG
+# CONFIGURATION
 # -------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -34,8 +34,9 @@ cloudinary.config(
 )
 
 # -------------------------------------------------
-# HELPER: LOAD PROMPT FILE
+# HELPERS
 # -------------------------------------------------
+
 def load_prompt_from_file(filepath, default_text):
     try:
         full_path = os.path.join(os.getcwd(), filepath)
@@ -46,70 +47,15 @@ def load_prompt_from_file(filepath, default_text):
         pass
     return default_text
 
-# -------------------------------------------------
-# CRITICAL FIX: FFMPEG SANITIZER
-# -------------------------------------------------
 def sanitize_text_for_ffmpeg(text):
     """
-    Escapes characters that break FFmpeg filters:
-    : (separates options) -> \:
-    , (separates filters) -> \,
-    ' (quote) -> empty or escaped
+    Cleans text to prevent FFmpeg crashes.
+    Removes quotes, escapes colons and commas.
     """
     if not text: return ""
-    # Remove quotes entirely to be safe, escape colons and commas
-    clean = text.replace("'", "").replace('"', '').replace(":", "\\:").replace(",", "\\,")
-    return clean
+    # Remove quotes, escape colons (: -> \:) and commas (, -> \,)
+    return text.replace("'", "").replace('"', '').replace(":", "\\:").replace(",", "\\,")
 
-# -------------------------------------------------
-# AI ENGINE
-# -------------------------------------------------
-def generate_expert_metadata(transcript_text):
-    default_prompt = "Generate JSON with 'title' (Clickbait), 'description', 'tags'."
-    system_instruction = load_prompt_from_file("prompts/prompt_youtube_metadata_generator.txt", default_prompt)
-
-    try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": f"Transcript: {transcript_text[:4000]}"}
-            ],
-            response_format={ "type": "json_object" }
-        )
-        return json.loads(response.choices[0].message.content)
-    except:
-        return {"title": "Viral Video", "description": "Watch this!", "tags": ""}
-
-def generate_thumbnail_hook(transcript_text, title):
-    """
-    Generates a SHORT (3-5 word) hook for the overlay.
-    We do NOT use the Image Synthesizer prompt here because that generates 
-    long descriptions which crash FFmpeg text rendering.
-    """
-    system_prompt = (
-        "You are a YouTube Thumbnail Expert. "
-        "Extract a 3-word to 5-word MAX shocking hook from the transcript "
-        "to be written in BIG TEXT on the thumbnail. "
-        "Do NOT describe an image. ONLY output the text."
-    )
-    
-    try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Title: {title}\nTranscript: {transcript_text[:1000]}"}
-            ]
-        )
-        # Force uppercase for impact
-        return response.choices[0].message.content.strip().upper()
-    except:
-        return title.upper()[:20]
-
-# -------------------------------------------------
-# MEDIA HELPERS
-# -------------------------------------------------
 def transform_drive_url(url):
     patterns = [r"/file/d/([a-zA-Z0-9_-]+)", r"id=([a-zA-Z0-9_-]+)"]
     for p in patterns:
@@ -152,26 +98,68 @@ def ensure_font(tmp_dir):
     return font_path
 
 # -------------------------------------------------
-# THUMBNAIL ENGINE (FFMPEG OVERLAY)
+# AI METADATA & HOOKS
+# -------------------------------------------------
+def generate_expert_metadata(transcript_text):
+    default_prompt = "Generate JSON with 'title', 'description', 'tags'."
+    system_instruction = load_prompt_from_file("prompts/prompt_youtube_metadata_generator.txt", default_prompt)
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": f"Transcript: {transcript_text[:4000]}"}
+            ],
+            response_format={ "type": "json_object" }
+        )
+        return json.loads(response.choices[0].message.content)
+    except:
+        return {"title": "Viral Video", "description": "", "tags": ""}
+
+def generate_thumbnail_hook(transcript_text, title):
+    """Generates a 3-5 word hook for the visual overlay."""
+    system_prompt = (
+        "You are a Viral Content Expert. "
+        "Create a 3 to 5 word 'Visual Hook' text that will be overlaid on the video thumbnail. "
+        "It must be short, punchy, and shocking. Return ONLY the text."
+    )
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Title: {title}\nTranscript: {transcript_text[:1000]}"}
+            ]
+        )
+        return response.choices[0].message.content.strip().upper()
+    except:
+        return title.upper()[:20]
+
+# -------------------------------------------------
+# THUMBNAIL GENERATOR (FIXED)
 # -------------------------------------------------
 def generate_thumbnail(video_path, font_path, output_path, text_overlay, duration, width):
+    """
+    Generates a thumbnail with centered text.
+    Uses -update 1 to fix the FFmpeg image sequence error.
+    """
     try:
         timestamp = duration / 2
         safe_font = sanitize_text_for_ffmpeg(font_path)
         safe_text = sanitize_text_for_ffmpeg(text_overlay)
         
-        # Make font massive
-        font_size = int(width / 7)
+        # Calculate large font size for the center text
+        font_size = int(width / 8)
         
-        # Box color: Black with 70% opacity
-        # Box border: 20px padding
+        # Draw Text centered with a semi-transparent black box
         vf = (
             f"drawtext=fontfile='{safe_font}':"
             f"text='{safe_text}':"
             f"fontcolor=white:"
             f"fontsize={font_size}:"
             f"x=(w-text_w)/2:y=(h-text_h)/2:"
-            f"box=1:boxcolor=black@0.7:boxborderw=20"
+            f"box=1:boxcolor=black@0.6:boxborderw=20"
         )
 
         cmd = [
@@ -180,58 +168,60 @@ def generate_thumbnail(video_path, font_path, output_path, text_overlay, duratio
             "-i", video_path,
             "-vf", vf,
             "-frames:v", "1",
+            "-update", "1", # CRITICAL FIX for single image output
             "-q:v", "2",
             output_path
         ]
         subprocess.run(cmd, check=True)
         return True
     except subprocess.CalledProcessError as e:
-        logging.error(f"Thumb Gen Error: {e}")
+        logging.error(f"Thumbnail Error: {e}")
         return False
 
 # -------------------------------------------------
-# RENDER VIDEO (ADJUSTED SIZES)
+# RENDER ENGINE (HORMOZI STYLE)
 # -------------------------------------------------
 def render_video(input_video, srt_file, font_path, output_video, channel_name, width, height):
     is_vertical = height > width
 
-    # --- 1. SIZES & POSITIONING ---
+    # 
+    
+    # 1. SETUP SIZES
     if is_vertical:
-        # Shorts (9:16)
         play_res = "PlayResX=1080,PlayResY=1920"
+        # Subtitles: Make them BIG
+        sub_font_size = 26 
+        sub_margin_v = 200 # Lifted up from bottom UI
         
-        # Subtitles (BIGGER)
-        sub_font_size = 34
-        sub_margin_v = 200 # Higher up to avoid UI
-        
-        # Branding (BIGGER)
+        # Branding: STRICTLY 30 as requested
         brand_size = 30
-        brand_x = "w-text_w-40" # 40px from right
-        brand_y = "60"          # 60px from top
-    else:
-        # Landscape (16:9)
-        play_res = "PlayResX=1920,PlayResY=1080"
-        
-        sub_font_size = 40
-        sub_margin_v = 100
-        
-        brand_size = 80
-        brand_x = "w-text_w-50"
+        brand_x = "w-text_w-20" # Top Right
         brand_y = "50"
+    else:
+        play_res = "PlayResX=1920,PlayResY=1080"
+        sub_font_size = 34
+        sub_margin_v = 90
+        
+        brand_size = 30
+        brand_x = "w-text_w-30"
+        brand_y = "30"
 
-    # --- 2. SUBTITLE STYLING ---
-    # BorderStyle=3 (Opaque Box) is best for visibility
-    # BackColour=&H80000000 (Black with 50% transparency)
+    # 
+
+    # 2. SUBTITLE STYLE (The "Hormozi" Box)
+    # BorderStyle=3 -> Opaque Box (Solid background)
+    # BackColour=&H80000000 -> Black with 50% opacity (Standard format: &H(Alpha)(Blue)(Green)(Red))
+    # We use &H00000000 (Opaque Black) for the box to ensure text readability
     sub_style = (
         f"FontName=Arial,"
         f"FontSize={sub_font_size},"
-        f"PrimaryColour=&H00FFFFFF," 
-        f"OutlineColour=&H00000000,"
-        f"BackColour=&H80000000,"
-        f"BorderStyle=3," 
-        f"Outline=0,"
+        f"PrimaryColour=&H00FFFFFF,"   # White Text
+        f"OutlineColour=&H00000000,"   # Black Outline
+        f"BackColour=&H60000000,"      # Semi-Opaque Black Box
+        f"BorderStyle=3,"              # 3 = BOX MODE
+        f"Outline=1,"
         f"Shadow=0,"
-        f"Alignment=2,"
+        f"Alignment=2,"                # Bottom Center
         f"MarginV={sub_margin_v},"
         f"WrapStyle=2,"
         f"{play_res}"
@@ -242,19 +232,17 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     font_dir = os.path.dirname(safe_font)
     safe_brand = sanitize_text_for_ffmpeg(channel_name)
 
-    # --- 3. BRANDING FILTER ---
-    # Added shadow for extra visibility
+    # 3. BRANDING (Top Right, Animated)
     branding_filter = (
         f"drawtext=fontfile='{safe_font}':"
         f"text='{safe_brand}':"
         f"fontcolor=#FFD700:" # Gold
         f"fontsize={brand_size}:"
         f"x={brand_x}:y={brand_y}:"
-        f"shadowcolor=black@0.8:shadowx=4:shadowy=4:" # Strong Shadow
-        f"alpha='0.7+0.3*sin(2*PI*t/3)'"
+        f"alpha='0.8+0.2*sin(2*PI*t/2)'" # Subtle Pulse
     )
 
-    # --- 4. SUBTITLES FILTER ---
+    # 4. SUBS
     subtitle_filter = (
         f"subtitles='{safe_srt}':"
         f"fontsdir='{font_dir}':"
@@ -307,19 +295,19 @@ def process_video_upload(self, form_data):
         )
         full_text = transcript.text
 
-        # 3. METADATA & HOOKS
+        # 3. GENERATE METADATA & HOOKS
         seo_data = generate_expert_metadata(full_text)
-        
-        # USE A DEDICATED HOOK GENERATOR (Prevents "Visual Description" Crash)
-        thumb_text = generate_thumbnail_hook(full_text, seo_data.get("title", ""))
+        thumb_text = generate_thumbnail_hook(full_text, seo_data.get("title", "Must Watch"))
 
-        # 4. SRT GENERATION
-        srt_text = ""
+        # 4. GENERATE SRT FILE
+        srt_content = ""
         for i, seg in enumerate(transcript.segments):
-            srt_text += f"{i+1}\n{format_ts(seg.start)} --> {format_ts(seg.end)}\n{seg.text.strip()}\n\n"
-        with open(srt, "w", encoding="utf-8") as f: f.write(srt_text)
+            srt_content += f"{i+1}\n{format_ts(seg.start)} --> {format_ts(seg.end)}\n{seg.text.strip()}\n\n"
+        
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write(srt_content)
 
-        # 5. RENDER VIDEO
+        # 5. RENDER
         update("Rendering")
         render_video(raw, srt, font, final, channel, w, h)
 
@@ -340,7 +328,8 @@ def process_video_upload(self, form_data):
             "status": "success",
             "video_url": vid_res["secure_url"],
             "thumbnail_url": thumb_url,
-            "metadata": seo_data
+            "metadata": seo_data,
+            "transcript_text": full_text  # RETURNED EXPLICITLY
         }
 
     except Exception as e:
