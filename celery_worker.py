@@ -192,12 +192,11 @@ def generate_formatted_transcript(segments):
     return formatted_text
 
 # -------------------------------------------------
-# [FIXED] RENDER ENGINE WITH BLUR & BRANDING
+# RENDER ENGINE (BLUR + BRANDING)
 # -------------------------------------------------
 def render_video(input_video, srt_file, font_path, output_video, channel_name, width, height, should_blur):
     is_vertical = height > width
 
-    # --- 1. CONFIGURATION ---
     if is_vertical:
         play_res = "PlayResX=1080,PlayResY=1920"
         sub_font_size = 70
@@ -228,19 +227,10 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     safe_brand = sanitize(channel_name)
     font_dir = os.path.dirname(safe_font)
 
-    # --- 2. BUILD FILTER CHAIN ---
-    # We use -filter_complex for efficient chain processing
     filters = []
-    
-    # Define Input Stream Name
     current_stream = "[0:v]"
 
-    # A. Header/Footer Blur (The "Mask" for TikTok UI)
     if should_blur:
-        # Split stream into 3: Main, Top, Bottom
-        # Crop Top 15%, Blur it
-        # Crop Bottom 15%, Blur it
-        # Overlay them back onto Main
         filters.append(f"{current_stream}split=3[main][top][bottom]")
         filters.append("[top]crop=iw:ih*0.15:0:0,boxblur=20[blur_top]")
         filters.append("[bottom]crop=iw:ih*0.15:0:ih*0.85,boxblur=20[blur_bottom]")
@@ -248,7 +238,6 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
         filters.append("[v_half][blur_bottom]overlay=0:h-h*0.15[v_blurred]")
         current_stream = "[v_blurred]"
 
-    # B. Branding (Watermark)
     filters.append(f"{current_stream}drawtext=fontfile='{safe_font}':text='{safe_brand}':"
                    f"fontcolor=#FFD700:fontsize={brand_size}:"
                    f"x={brand_x}:y={brand_y}:"
@@ -256,17 +245,13 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
                    f"alpha='0.8+0.2*sin(2*PI*t/2)'[v_branded]")
     current_stream = "[v_branded]"
 
-    # C. Subtitles (Burn-in)
     filters.append(f"{current_stream}subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{sub_style}'[v_out]")
-    
-    # Combine filters into one string
     filter_complex = ";".join(filters)
 
-    # --- 3. RUN FFMPEG ---
     cmd = [
         "ffmpeg", "-y", "-i", input_video,
         "-filter_complex", filter_complex,
-        "-map", "[v_out]", "-map", "0:a", # Map processed video and original audio
+        "-map", "[v_out]", "-map", "0:a",
         "-c:v", "libx264", "-preset", "superfast", "-crf", "23", 
         "-c:a", "aac",
         output_video
@@ -274,9 +259,9 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     subprocess.run(cmd, check=True)
 
 # -------------------------------------------------
-# YOUTUBE UPLOAD FUNCTION
+# [UPDATED] YOUTUBE UPLOAD (VIDEO + THUMBNAIL)
 # -------------------------------------------------
-def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=None):
+def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=None, thumbnail_path=None):
     try:
         logging.info("🚀 Initiating YouTube Upload...")
         credentials = Credentials(**creds_dict)
@@ -304,6 +289,7 @@ def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=No
             }
         }
 
+        # 1. Upload Video
         media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
         request = youtube.videos().insert(part=','.join(body.keys()), body=body, media_body=media)
         
@@ -315,6 +301,19 @@ def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=No
 
         video_id = response.get("id")
         logging.info(f"✅ YouTube Upload Success! Video ID: {video_id}")
+
+        # 2. [NEW] Upload Thumbnail
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            logging.info("📸 Uploading Thumbnail...")
+            try:
+                youtube.thumbnails().set(
+                    videoId=video_id,
+                    media_body=MediaFileUpload(thumbnail_path)
+                ).execute()
+                logging.info("✅ Thumbnail Set Successfully!")
+            except Exception as e:
+                logging.error(f"⚠️ Thumbnail Upload Failed: {e}")
+
         return f"https://youtu.be/{video_id}"
 
     except Exception as e:
@@ -344,8 +343,6 @@ def process_video_upload(self, form_data):
         dur, w, h = get_video_info(raw)
         font = ensure_font(tmp)
         channel = form_data.get("channel_name", "@ViralShorts")
-        
-        # [NEW] Get Blur Toggle
         should_blur = form_data.get("blur_watermarks") == 'true'
 
         update("Processing Audio")
@@ -361,7 +358,6 @@ def process_video_upload(self, form_data):
         create_5word_srt(transcript_obj.segments, srt)
 
         update("Rendering Video")
-        # [UPDATED] Pass should_blur to render engine
         render_video(raw, srt, font, final, channel, w, h, should_blur)
 
         update("Creating AI Thumbnail")
@@ -396,7 +392,8 @@ def process_video_upload(self, form_data):
                 form_data["youtube_creds"], 
                 final, 
                 seo,
-                full_transcript_text
+                full_transcript_text,
+                thumb_path if has_thumb else None # <--- Passed here
             )
 
         return {
