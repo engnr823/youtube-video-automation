@@ -153,7 +153,7 @@
                 <div class="toggle-switch" id="blurOptionContainer">
                     <div>
                         <span class="toggle-label">Blur Header/Footer</span>
-                        <span class="toggle-desc">Hide TikTok/Reels UI and Watermarks (Bottom 15%).</span>
+                        <span class="toggle-desc">Hide TikTok/Reels UI and Watermarks (Bottom 7%).</span>
                     </div>
                     <div class="form-check form-switch">
                         <input class="form-check-input" type="checkbox" name="blur_watermarks" value="true" checked>
@@ -408,12 +408,17 @@
                 document.getElementById("transcriptBox").value = data.transcript_srt;
             }
 
-            // 5. [NEW] YouTube Link
+            // 5. [FIXED] YouTube Link - Remove old alerts first
+            const col5 = document.getElementById('resultArea').querySelector('.col-md-5');
+            const existingAlert = document.getElementById('yt-success-alert');
+            if (existingAlert) existingAlert.remove(); // Clean up previous link
+
             if (data.youtube_url) {
                 const ytDiv = document.createElement('div');
+                ytDiv.id = 'yt-success-alert'; // Assign ID to find it later
                 ytDiv.className = 'alert alert-success mt-3';
                 ytDiv.innerHTML = `<i class="bi bi-youtube"></i> <strong>Published to YouTube:</strong> <a href="${data.youtube_url}" target="_blank" class="alert-link">Watch Video</a>`;
-                document.getElementById('resultArea').querySelector('.col-md-5').appendChild(ytDiv);
+                col5.appendChild(ytDiv);
             }
         }
 
