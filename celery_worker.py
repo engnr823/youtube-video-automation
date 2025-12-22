@@ -262,9 +262,9 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     subprocess.run(cmd, check=True)
 
 # -------------------------------------------------
-# YOUTUBE UPLOAD (VIDEO + THUMBNAIL)
+# YOUTUBE UPLOAD (VIDEO + THUMBNAIL + CATEGORY)
 # -------------------------------------------------
-def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=None, thumbnail_path=None):
+def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=None, thumbnail_path=None, category_id='22'):
     try:
         logging.info("🚀 Initiating YouTube Upload...")
         credentials = Credentials(**creds_dict)
@@ -284,7 +284,7 @@ def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=No
                 'title': title,
                 'description': description,
                 'tags': tags[:15],
-                'categoryId': '22'
+                'categoryId': category_id # [UPDATED] Uses variable from frontend
             },
             'status': {
                 'privacyStatus': 'private',
@@ -394,7 +394,8 @@ def process_video_upload(self, form_data):
                 final, 
                 seo,
                 full_transcript_text,
-                thumb_path if has_thumb else None
+                thumb_path if has_thumb else None,
+                form_data.get("youtube_category", "22") # [UPDATED] Pass Category ID
             )
 
         return {
