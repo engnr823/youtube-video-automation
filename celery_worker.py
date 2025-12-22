@@ -33,7 +33,6 @@ logging.basicConfig(
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Ensure REPLICATE_API_TOKEN is in your environment variables
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 
 cloudinary.config(
@@ -121,10 +120,7 @@ def generate_metadata(transcript):
         return {"title": "Viral Video", "description": "", "tags": ""}
 
 def generate_thumbnail_image(transcript, title, tmp_dir, width, height):
-    """Generates an AI Image using Replicate (Flux-Schnell)."""
     img_prompt_sys = load_prompt("prompts/prompt_image_synthesizer.txt", "Describe a high quality youtube thumbnail background image.")
-    
-    # 1. Get Visual Prompt
     try:
         desc_res = openai_client.chat.completions.create(
             model="gpt-4o",
@@ -139,7 +135,6 @@ def generate_thumbnail_image(transcript, title, tmp_dir, width, height):
 
     aspect_ratio = "9:16" if height > width else "16:9"
 
-    # 2. Generate Image (Replicate)
     try:
         logging.info(f"🎨 Generating Flux Image ({aspect_ratio}): {visual_prompt[:50]}...")
         output = replicate.run(
@@ -152,7 +147,6 @@ def generate_thumbnail_image(transcript, title, tmp_dir, width, height):
             }
         )
         image_url = output[0]
-        
         local_path = os.path.join(tmp_dir, "ai_thumb_bg.png")
         with requests.get(str(image_url)) as r:
             with open(local_path, "wb") as f:
@@ -163,65 +157,51 @@ def generate_thumbnail_image(transcript, title, tmp_dir, width, height):
         return None
 
 # -------------------------------------------------
-# SRT FORMATTER (5 WORDS, NO SPLIT)
+# SRT FORMATTER
 # -------------------------------------------------
 def create_5word_srt(segments, output_path):
-    """
-    Formats subtitles to appear in chunks of exactly 5 words (or less at end).
-    Does NOT split inside the chunk, keeping it as one line.
-    """
     srt_content = ""
     index = 1
-    
     for seg in segments:
         words = seg.text.strip().split()
         start = seg.start
         end = seg.end
         duration = end - start
-        
         if not words: continue
-
-        # EXACTLY 5 WORDS per chunk
         chunk_size = 5
         chunks = [words[i:i + chunk_size] for i in range(0, len(words), chunk_size)]
         chunk_duration = duration / len(chunks)
-        
         current_start = start
         for chunk in chunks:
             current_end = current_start + chunk_duration
-            
-            # Join words with space (One line)
             text_block = " ".join(chunk)
-            
             srt_content += f"{index}\n"
             srt_content += f"{format_ts(current_start)} --> {format_ts(current_end)}\n"
             srt_content += f"{text_block}\n\n"
-            
             current_start = current_end
             index += 1
-
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(srt_content)
 
 def generate_formatted_transcript(segments):
-    """Generates a readable transcript with timestamps."""
     formatted_text = ""
     for seg in segments:
-        start_ts = format_ts(seg.start).split(',')[0] # Remove milliseconds
+        start_ts = format_ts(seg.start).split(',')[0]
         end_ts = format_ts(seg.end).split(',')[0]
         formatted_text += f"[{start_ts} - {end_ts}] {seg.text.strip()}\n"
     return formatted_text
 
 # -------------------------------------------------
-# RENDER ENGINE
+# [FIXED] RENDER ENGINE WITH BLUR & BRANDING
 # -------------------------------------------------
-def render_video(input_video, srt_file, font_path, output_video, channel_name, width, height):
+def render_video(input_video, srt_file, font_path, output_video, channel_name, width, height, should_blur):
     is_vertical = height > width
 
+    # --- 1. CONFIGURATION ---
     if is_vertical:
         play_res = "PlayResX=1080,PlayResY=1920"
-        sub_font_size = 70  # Readable size
-        sub_margin_v = 140  # Bottom Safe
+        sub_font_size = 70
+        sub_margin_v = 140
         brand_size = 30
         brand_x = "w-text_w-30"
         brand_y = "50"
@@ -233,13 +213,12 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
         brand_x = "w-text_w-30"
         brand_y = "30"
 
-    # STYLE: Opaque Grey Box with Black Outline
     sub_style = (
         f"FontName=Arial,FontSize={sub_font_size},PrimaryColour=&H00FFFFFF,"
-        f"OutlineColour=&H00000000,"  # Black Outline
-        f"BackColour=&H00808080,"      # Opaque Grey Box
-        f"BorderStyle=3,"             # Box Mode
-        f"Outline=2,"                 # Thicker Outline
+        f"OutlineColour=&H00000000,"
+        f"BackColour=&H00808080,"
+        f"BorderStyle=3,"
+        f"Outline=2,"
         f"Shadow=0,Alignment=2,MarginV={sub_margin_v},"
         f"WrapStyle=2,{play_res}"
     )
@@ -249,26 +228,53 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     safe_brand = sanitize(channel_name)
     font_dir = os.path.dirname(safe_font)
 
-    brand_filter = (
-        f"drawtext=fontfile='{safe_font}':text='{safe_brand}':"
-        f"fontcolor=#FFD700:fontsize={brand_size}:"
-        f"x={brand_x}:y={brand_y}:"
-        f"shadowcolor=black@0.8:shadowx=2:shadowy=2:"
-        f"alpha='0.8+0.2*sin(2*PI*t/2)'"
-    )
+    # --- 2. BUILD FILTER CHAIN ---
+    # We use -filter_complex for efficient chain processing
+    filters = []
+    
+    # Define Input Stream Name
+    current_stream = "[0:v]"
 
-    sub_filter = f"subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{sub_style}'"
+    # A. Header/Footer Blur (The "Mask" for TikTok UI)
+    if should_blur:
+        # Split stream into 3: Main, Top, Bottom
+        # Crop Top 15%, Blur it
+        # Crop Bottom 15%, Blur it
+        # Overlay them back onto Main
+        filters.append(f"{current_stream}split=3[main][top][bottom]")
+        filters.append("[top]crop=iw:ih*0.15:0:0,boxblur=20[blur_top]")
+        filters.append("[bottom]crop=iw:ih*0.15:0:ih*0.85,boxblur=20[blur_bottom]")
+        filters.append("[main][blur_top]overlay=0:0[v_half]")
+        filters.append("[v_half][blur_bottom]overlay=0:h-h*0.15[v_blurred]")
+        current_stream = "[v_blurred]"
 
+    # B. Branding (Watermark)
+    filters.append(f"{current_stream}drawtext=fontfile='{safe_font}':text='{safe_brand}':"
+                   f"fontcolor=#FFD700:fontsize={brand_size}:"
+                   f"x={brand_x}:y={brand_y}:"
+                   f"shadowcolor=black@0.8:shadowx=2:shadowy=2:"
+                   f"alpha='0.8+0.2*sin(2*PI*t/2)'[v_branded]")
+    current_stream = "[v_branded]"
+
+    # C. Subtitles (Burn-in)
+    filters.append(f"{current_stream}subtitles='{safe_srt}':fontsdir='{font_dir}':force_style='{sub_style}'[v_out]")
+    
+    # Combine filters into one string
+    filter_complex = ";".join(filters)
+
+    # --- 3. RUN FFMPEG ---
     cmd = [
         "ffmpeg", "-y", "-i", input_video,
-        "-vf", f"{brand_filter},{sub_filter}",
-        "-c:v", "libx264", "-preset", "superfast", "-crf", "23", "-c:a", "aac",
+        "-filter_complex", filter_complex,
+        "-map", "[v_out]", "-map", "0:a", # Map processed video and original audio
+        "-c:v", "libx264", "-preset", "superfast", "-crf", "23", 
+        "-c:a", "aac",
         output_video
     ]
     subprocess.run(cmd, check=True)
 
 # -------------------------------------------------
-# [UPDATED] YOUTUBE UPLOAD FUNCTION
+# YOUTUBE UPLOAD FUNCTION
 # -------------------------------------------------
 def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=None):
     try:
@@ -276,12 +282,11 @@ def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=No
         credentials = Credentials(**creds_dict)
         youtube = build('youtube', 'v3', credentials=credentials)
 
-        title = metadata.get("title", "AI Generated Video")[:100] # YouTube limit
+        title = metadata.get("title", "AI Generated Video")[:100]
         description = metadata.get("description", "Uploaded via AI Viral Editor")
         
-        # [NEW] Append Transcript to Description if available
         if transcript_text:
-            description += "\n\n" + ("="*20) + "\nTRANSCRIPT:\n" + transcript_text[:4000] # Safe limit
+            description += "\n\n" + ("="*20) + "\nTRANSCRIPT:\n" + transcript_text[:4000]
 
         tags = metadata.get("tags", [])
         if isinstance(tags, str): tags = [tags]
@@ -291,21 +296,16 @@ def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=No
                 'title': title,
                 'description': description,
                 'tags': tags[:15],
-                'categoryId': '22' # People & Blogs
+                'categoryId': '22'
             },
             'status': {
-                'privacyStatus': 'private', # Start private for safety
+                'privacyStatus': 'private',
                 'selfDeclaredMadeForKids': False
             }
         }
 
         media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
-        
-        request = youtube.videos().insert(
-            part=','.join(body.keys()),
-            body=body,
-            media_body=media
-        )
+        request = youtube.videos().insert(part=','.join(body.keys()), body=body, media_body=media)
         
         response = None
         while response is None:
@@ -344,6 +344,9 @@ def process_video_upload(self, form_data):
         dur, w, h = get_video_info(raw)
         font = ensure_font(tmp)
         channel = form_data.get("channel_name", "@ViralShorts")
+        
+        # [NEW] Get Blur Toggle
+        should_blur = form_data.get("blur_watermarks") == 'true'
 
         update("Processing Audio")
         subprocess.run(["ffmpeg", "-y", "-i", raw, "-map", "a", "-q:a", "0", audio], check=True)
@@ -351,43 +354,30 @@ def process_video_upload(self, form_data):
         transcript_obj = openai_client.audio.translations.create(
             model="whisper-1", file=open(audio, "rb"), response_format="verbose_json"
         )
-        
-        # GENERATE FORMATTED TRANSCRIPT
         full_transcript_text = generate_formatted_transcript(transcript_obj.segments)
 
         update("Generating Assets")
         seo = generate_metadata(full_transcript_text)
-        
-        # Create SRT (5 Words max per line)
         create_5word_srt(transcript_obj.segments, srt)
 
         update("Rendering Video")
-        render_video(raw, srt, font, final, channel, w, h)
+        # [UPDATED] Pass should_blur to render engine
+        render_video(raw, srt, font, final, channel, w, h, should_blur)
 
         update("Creating AI Thumbnail")
-        # Generate using Flux
         ai_bg = generate_thumbnail_image(full_transcript_text, seo.get("title",""), tmp, w, h)
         has_thumb = False
         
         if ai_bg:
-            # NO TEXT OVERLAY - Use pure AI image
-            # Convert PNG to JPG for thumbnail
             try:
-                subprocess.run([
-                    "ffmpeg", "-y", "-i", ai_bg, "-q:v", "2", thumb_path
-                ], check=True)
+                subprocess.run(["ffmpeg", "-y", "-i", ai_bg, "-q:v", "2", thumb_path], check=True)
                 has_thumb = True
             except Exception as e:
                 logging.error(f"Thumb conversion failed: {e}")
         
-        # Fallback to screenshot if AI failed
         if not has_thumb:
-            logging.info("Fallback: Using Video Frame for Thumbnail")
             try:
-                subprocess.run([
-                    "ffmpeg", "-y", "-ss", str(dur/2), "-i", final,
-                    "-frames:v", "1", "-update", "1", thumb_path
-                ], check=True)
+                subprocess.run(["ffmpeg", "-y", "-ss", str(dur/2), "-i", final, "-frames:v", "1", "-update", "1", thumb_path], check=True)
                 has_thumb = True
             except: pass
 
@@ -399,7 +389,6 @@ def process_video_upload(self, form_data):
             thumb_res = cloudinary.uploader.upload(thumb_path, resource_type="image", folder="viral_thumbnails")
             thumb_url = thumb_res["secure_url"]
 
-        # [UPDATED] Handle YouTube Upload with Transcript
         youtube_link = None
         if form_data.get("youtube_creds"):
             update("Uploading to YouTube")
@@ -407,7 +396,7 @@ def process_video_upload(self, form_data):
                 form_data["youtube_creds"], 
                 final, 
                 seo,
-                full_transcript_text # <--- Passed here
+                full_transcript_text
             )
 
         return {
