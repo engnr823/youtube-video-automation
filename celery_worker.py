@@ -268,9 +268,9 @@ def render_video(input_video, srt_file, font_path, output_video, channel_name, w
     subprocess.run(cmd, check=True)
 
 # -------------------------------------------------
-# [NEW] YOUTUBE UPLOAD FUNCTION
+# [UPDATED] YOUTUBE UPLOAD FUNCTION
 # -------------------------------------------------
-def upload_video_to_youtube(creds_dict, video_path, metadata):
+def upload_video_to_youtube(creds_dict, video_path, metadata, transcript_text=None):
     try:
         logging.info("🚀 Initiating YouTube Upload...")
         credentials = Credentials(**creds_dict)
@@ -278,6 +278,11 @@ def upload_video_to_youtube(creds_dict, video_path, metadata):
 
         title = metadata.get("title", "AI Generated Video")[:100] # YouTube limit
         description = metadata.get("description", "Uploaded via AI Viral Editor")
+        
+        # [NEW] Append Transcript to Description if available
+        if transcript_text:
+            description += "\n\n" + ("="*20) + "\nTRANSCRIPT:\n" + transcript_text[:4000] # Safe limit
+
         tags = metadata.get("tags", [])
         if isinstance(tags, str): tags = [tags]
 
@@ -394,21 +399,22 @@ def process_video_upload(self, form_data):
             thumb_res = cloudinary.uploader.upload(thumb_path, resource_type="image", folder="viral_thumbnails")
             thumb_url = thumb_res["secure_url"]
 
-        # [NEW] Handle YouTube Upload
+        # [UPDATED] Handle YouTube Upload with Transcript
         youtube_link = None
         if form_data.get("youtube_creds"):
             update("Uploading to YouTube")
             youtube_link = upload_video_to_youtube(
                 form_data["youtube_creds"], 
                 final, 
-                seo
+                seo,
+                full_transcript_text # <--- Passed here
             )
 
         return {
             "status": "success",
             "video_url": vid_res["secure_url"],
             "thumbnail_url": thumb_url,
-            "youtube_url": youtube_link, # [NEW] Return YouTube link
+            "youtube_url": youtube_link, 
             "metadata": seo,
             "transcript_srt": full_transcript_text 
         }
